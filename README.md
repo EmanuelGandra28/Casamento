@@ -1,32 +1,36 @@
 # App do Casamento
 
-Aplicação web responsiva para noivos e convidados. No primeiro acesso, ela começa sem informações: os noivos criam o acesso e preenchem os dados em **Configurações**.
+Site responsivo para noivos e convidados, publicado no GitHub Pages e conectado ao Supabase. Convidados, RSVP, presentes, orçamento e atualizações ficam em uma base compartilhada.
 
-## Rodar como aplicativo web
+## Publicar pela primeira vez
 
-No diretório do projeto, execute:
+1. Crie um projeto em [Supabase](https://supabase.com/dashboard).
+2. No **SQL Editor**, execute `supabase/schema.sql`.
+3. Em **Authentication > Providers > Email**, mantenha e-mail/senha ativo. Confirme o e-mail criado pelos noivos ou desative temporariamente a confirmação para o primeiro acesso.
+4. Em **Project Settings > API**, copie a **Project URL** e a chave **anon/public publishable**. Nunca use a chave `service_role` no site.
+5. No GitHub, abra **Settings > Secrets and variables > Actions** e crie os segredos `SUPABASE_URL` e `SUPABASE_ANON_KEY`.
+6. Em **Settings > Pages**, escolha **GitHub Actions** como fonte de publicação.
+7. Envie a branch `main`. O site será publicado em `https://emanuelgandra28.github.io/Casamento/`.
 
-```powershell
-npm start
-```
+O workflow gera `config.js` durante a publicação. Para testar no computador, preencha manualmente `config.js` com os mesmos valores públicos.
 
-Depois abra `http://localhost:4173` no computador. Para abrir no celular na mesma rede Wi-Fi, use o endereço IPv4 do computador com a porta `4173`, por exemplo: `http://192.168.0.10:4173`.
+## RSVP em duas etapas por WhatsApp
 
-Abrir o `index.html` diretamente não é a forma recomendada. O servidor incluído garante que todos os arquivos sejam carregados corretamente.
+`supabase/functions/guest-access/index.ts` é a função protegida que valida PIN e responsável, cria um código de seis dígitos e grava a confirmação. Publique-a no Supabase como Edge Function e configure estes segredos lá:
 
-## Fluxos disponíveis
+- `WHATSAPP_TOKEN`
+- `WHATSAPP_PHONE_NUMBER_ID`
+- `WHATSAPP_TEMPLATE_NAME`
 
-- Configuração inicial em branco.
-- Login dos noivos com senha definida no primeiro acesso.
-- Login do convidado em duas etapas: PIN da família e responsável pela família. O código `123456` é a simulação local da verificação enviada por mensagem.
-- Famílias com PIN exclusivo de quatro dígitos e mensagem de convite preparada para WhatsApp.
-- Cadastro e edição de convidados, lista de presentes e orçamento.
-- Presentes com até dois links de lojas, edição e exclusão.
-- Temas, cores principal/secundária, fonte e imagem de fundo.
-- Central de atualizações com RSVP, orçamento e alterações recentes.
+O modelo de mensagem do WhatsApp deve receber o código como primeiro parâmetro do corpo. Sem esses segredos, o app não libera RSVP e não expõe dados de famílias.
 
-## Publicação por link público
+## Segurança
 
-O projeto está pronto para uma hospedagem estática. Para um link acessível fora da rede local, publique os arquivos em um serviço como Netlify, Vercel, Cloudflare Pages ou GitHub Pages. Essa etapa exige a conta do serviço escolhido.
+- Orçamento, famílias, telefones e PINs só podem ser vistos pelos noivos autenticados.
+- O site público lê somente a cerimônia e a lista de presentes.
+- O RSVP passa pela Edge Function; convidados não acessam tabelas privadas.
+- A chave `service_role` fica apenas nos segredos da função, nunca no GitHub Pages.
 
-> Esta versão armazena dados somente no navegador. Para uso real por todos os convidados, é necessário conectar um banco de dados, autenticação segura e um provedor de WhatsApp/e-mail para enviar o segundo fator.
+## Desenvolvimento local
+
+Execute `npm start` e abra `http://localhost:4173`. Para testar no celular na mesma rede, use o IPv4 do computador com a porta `4173`.
