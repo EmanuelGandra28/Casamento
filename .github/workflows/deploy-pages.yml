@@ -22,8 +22,6 @@ jobs:
         run: |
           echo "window.APP_CONFIG = { supabaseUrl: '${{ secrets.SUPABASE_URL }}', supabaseAnonKey: '${{ secrets.SUPABASE_ANON_KEY }}', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
