@@ -19,8 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Criar configuração pública
+        env:
+          SUPABASE_URL_VALUE: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_KEY_VALUE: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY }}
         run: |
-          echo "window.APP_CONFIG = { supabaseUrl: '${{ secrets.SUPABASE_URL }}', supabaseAnonKey: '${{ secrets.SUPABASE_ANON_KEY }}', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
+          echo "window.APP_CONFIG = { supabaseUrl: '$SUPABASE_URL_VALUE', supabaseAnonKey: '$SUPABASE_KEY_VALUE', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
