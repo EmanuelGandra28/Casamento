@@ -23,7 +23,9 @@ jobs:
           SUPABASE_URL_VALUE: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
           SUPABASE_KEY_VALUE: ${{ secrets.SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY }}
         run: |
-          echo "window.APP_CONFIG = { supabaseUrl: '$SUPABASE_URL_VALUE', supabaseAnonKey: '$SUPABASE_KEY_VALUE', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
+          if [ -n "$SUPABASE_URL_VALUE" ] && [ -n "$SUPABASE_KEY_VALUE" ]; then
+            echo "window.APP_CONFIG = { supabaseUrl: '$SUPABASE_URL_VALUE', supabaseAnonKey: '$SUPABASE_KEY_VALUE', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
