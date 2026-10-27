@@ -904,6 +904,73 @@ button {
   font-size: 11px;
 }
 
+.modal.wide {
+  width: min(900px, 100%);
+}
+
+.head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.file-btn {
+  cursor: pointer;
+}
+
+.map-grid {
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  margin: 10px 0 14px;
+}
+
+.notice-warn {
+  margin: 6px 0;
+  padding: 9px 12px;
+  border-radius: 7px;
+  background: #fdf1df;
+  color: #8a6431;
+  font-size: 12px;
+}
+
+.warn {
+  color: #b07a35;
+  font-weight: 700;
+}
+
+.table.preview {
+  margin: 12px 0 16px;
+}
+
+.origin-panel {
+  margin-top: 14px;
+}
+
+.origin-panel .table {
+  border: 0;
+}
+
+.bar {
+  display: flex;
+  height: 6px;
+  margin-top: 7px;
+  max-width: 260px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #f1eee9;
+}
+
+.bar i.confirmed {
+  background: #7fa36f;
+}
+
+.bar i.pending {
+  background: #e3bf86;
+}
+
+.bar i.declined {
+  background: #c99089;
+}
+
 @media (max-width:900px) {
   .cards {
     grid-template-columns: repeat(2,1fr);

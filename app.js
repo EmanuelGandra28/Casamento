@@ -139,11 +139,11 @@ function closeModal() {
   $('#modal')?.remove()
 }
 
-function pop(x) {
+function pop(x, size = '') {
   closeModal()
   $('#app').insertAdjacentHTML(
     'beforeend',
-    `<div class="modal-bg" id="modal"><div class="modal"><button class="close" id="close">×</button><div id="modalBody">${x}</div></div></div>`,
+    `<div class="modal-bg" id="modal"><div class="modal ${size}"><button class="close" id="close">×</button><div id="modalBody">${x}</div></div></div>`,
   )
   $('#close').onclick = closeModal
   $('#modal').onclick = (e) => {
@@ -451,7 +451,49 @@ function panel() {
       <article class="panel"><h3>Atualizações recentes</h3>${recent}</article>
       <article class="panel"><h3>Próximos pagamentos</h3>${upcoming}</article>
     </section>
+    ${originPanel()}
   </main>`
+}
+
+// Pessoas por origem: total, confirmados, pendentes e quem não vai, na ordem da planilha.
+function originPanel() {
+  const stats = new Map()
+  for (const f of F) {
+    const origin = f.origin?.trim() || 'Sem origem'
+    if (!stats.has(origin)) stats.set(origin, { total: 0, confirmed: 0, pending: 0, declined: 0 })
+    const s = stats.get(origin)
+    for (const g of f.guests) {
+      s.total++
+      s[g.rsvp_status]++
+    }
+  }
+  if (!stats.size) return ''
+  const rank = (o) => (ORIGINS.includes(o) ? ORIGINS.indexOf(o) : o === 'Sem origem' ? 999 : 500)
+  const rows = [...stats.entries()]
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([origin, s]) => {
+      const pct = (n) => (s.total ? (n / s.total) * 100 : 0)
+      return `<tr>
+        <td><b>${esc(origin)}</b>
+          <div class="bar" title="${s.confirmed} confirmados, ${s.pending} pendentes, ${s.declined} não vão">
+            <i class="confirmed" style="width:${pct(s.confirmed)}%"></i><i class="pending" style="width:${pct(s.pending)}%"></i><i class="declined" style="width:${pct(s.declined)}%"></i>
+          </div>
+        </td>
+        <td>${s.total}</td>
+        <td>${s.confirmed}</td>
+        <td>${s.pending}</td>
+        <td>${s.declined}</td>
+        <td><b>${Math.round(pct(s.confirmed))}%</b></td>
+      </tr>`
+    })
+    .join('')
+  return `<section class="panel origin-panel">
+    <h3>RSVP por origem</h3>
+    <table class="table">
+      <thead><tr><th>Origem</th><th>Pessoas</th><th>Confirmados</th><th>Pendentes</th><th>Não vão</th><th>Confirmação</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </section>`
 }
 
 const GUEST_FILTERS = {
@@ -494,7 +536,10 @@ function guestPanel() {
         <h2>Convidados</h2>
         <p>Cada família recebe um link próprio para confirmar a presença de cada pessoa.</p>
       </div>
-      <button class="btn primary" id="nf">+ Nova família</button>
+      <div class="head-actions">
+        <button class="btn soft" id="importGuests">Importar planilha</button>
+        <button class="btn primary" id="nf">+ Nova família</button>
+      </div>
     </div>
     <div class="toolbar">${filters}</div>
     <table class="table">
@@ -587,6 +632,7 @@ function settingsPanel() {
 function bind() {
   if (view === 'guests') {
     $('#nf').onclick = () => family()
+    $('#importGuests').onclick = importGuests
     document
       .querySelectorAll('[data-ef]')
       .forEach((b) => (b.onclick = () => family(F.find((f) => f.id === b.dataset.ef))))
@@ -651,6 +697,273 @@ function bind() {
       owner()
     }
   }
+}
+
+// ---------- Importação da planilha de convidados ----------
+
+const XLSX_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'
+
+// Colunas reconhecidas, em ordem de prioridade para adivinhar pelo cabeçalho.
+// "Nome do responsável" deve virar responsável, por isso `head` vem antes de `person`.
+const IMPORT_FIELDS = [
+  ['head', 'Responsável', ['responsavel']],
+  ['family', 'Família / núcleo', ['familia', 'nucleo', 'grupo']],
+  ['phone', 'WhatsApp', ['whatsapp', 'telefone', 'celular', 'fone', 'contato']],
+  ['origin', 'Origem', ['origem', 'categoria', 'lado']],
+  ['age', 'Faixa etária', ['faixa', 'idade', 'crianca']],
+  ['party', 'Padrinhos', ['padrinho', 'madrinha']],
+  ['person', 'Nome da pessoa', ['nome', 'convidado', 'pessoa']],
+]
+
+// Texto simplificado para comparar: sem acento, minúsculo, sem pontuação.
+const plain = (v) =>
+  String(v ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+
+// Chave da origem: ignora "(a)", "da/do", e trata amiga/amigo, convidada/convidado igual.
+const originKey = (v) =>
+  plain(String(v ?? '').replace(/\((a|o|s)\)/gi, ''))
+    .replace(/\bamiga\b/g, 'amigo')
+    .replace(/\bconvidada\b/g, 'convidado')
+    .split(' ')
+    .filter((w) => w && !['da', 'do', 'de', 'dos', 'das'].includes(w))
+    .join(' ')
+
+function matchOrigin(value) {
+  if (!String(value ?? '').trim()) return { origin: '', known: true }
+  const found = ORIGINS.find((o) => originKey(o) === originKey(value))
+  return { origin: found || String(value).trim(), known: !!found }
+}
+
+function ageGroup(value) {
+  const v = plain(value)
+  if (v.includes('beb')) return 'baby'
+  if (v.includes('crian') || v.includes('infant')) return 'child'
+  return 'adult'
+}
+
+// Só dígitos; números brasileiros com DDD (10 ou 11 dígitos) ganham o DDI 55.
+function whatsappNumber(value) {
+  const digits = String(value ?? '').replace(/\D/g, '')
+  return digits.length === 10 || digits.length === 11 ? '55' + digits : digits
+}
+
+const isYes = (value) => /^(sim|s|x|1|true|verdadeiro|padrinho|madrinha|padrinhos)$/.test(plain(value))
+
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = XLSX_SRC
+    s.onload = resolve
+    s.onerror = () => reject(new Error('Não foi possível carregar o leitor de planilhas. Verifique a internet.'))
+    document.head.append(s)
+  })
+}
+
+async function downloadTemplate() {
+  await loadXlsx()
+  const book = XLSX.utils.book_new()
+  const guests = XLSX.utils.aoa_to_sheet([
+    ['Família', 'Nome', 'Responsável', 'WhatsApp', 'Origem', 'Faixa etária', 'Padrinhos'],
+    ['Família Silva', 'Ana Silva', 'Ana Silva', '5511999999999', 'Família Noiva', 'Adulto', 'Sim'],
+    ['Família Silva', 'Pedro Silva', '', '', '', 'Adulto', ''],
+    ['Família Silva', 'Lia Silva', '', '', '', 'Criança', ''],
+    ['Carlos Souza', 'Carlos Souza', '', '5511988888888', 'Amigo(a) do Noivo', 'Adulto', ''],
+  ])
+  guests['!cols'] = [{ wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 30 }, { wch: 12 }, { wch: 10 }]
+  XLSX.utils.book_append_sheet(book, guests, 'Convidados')
+  XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['Origens aceitas'], ...ORIGINS.map((o) => [o])]), 'Origens')
+  XLSX.writeFile(book, 'modelo-convidados.xlsx')
+}
+
+// Lê a primeira aba: a primeira linha preenchida é o cabeçalho.
+async function readSheet(file) {
+  await loadXlsx()
+  const bytes = await file.arrayBuffer()
+  let book
+  if (/\.csv$/i.test(file.name)) {
+    // CSV do Excel em português costuma vir em Windows-1252; os demais, em UTF-8.
+    let text = new TextDecoder('utf-8').decode(bytes)
+    if (text.includes('�')) text = new TextDecoder('windows-1252').decode(bytes)
+    book = XLSX.read(text.replace(/^﻿/, ''), { type: 'string' })
+  } else {
+    book = XLSX.read(bytes, { type: 'array' })
+  }
+  const rows = XLSX.utils
+    .sheet_to_json(book.Sheets[book.SheetNames[0]], { header: 1, defval: '', raw: false })
+    .filter((r) => r.some((c) => String(c).trim()))
+  if (rows.length < 2) throw new Error('A planilha precisa de um cabeçalho e pelo menos uma linha de convidado.')
+  const [header, ...data] = rows
+  return { header: header.map((h) => String(h).trim()), data }
+}
+
+function guessColumns(header) {
+  const used = new Set()
+  const map = {}
+  for (const [key, , words] of IMPORT_FIELDS) {
+    const index = header.findIndex((h, i) => !used.has(i) && words.some((w) => plain(h).includes(w)))
+    map[key] = index
+    if (index >= 0) used.add(index)
+  }
+  return map
+}
+
+// Agrupa as linhas em famílias. Sem coluna de família, cada pessoa vira uma família.
+function buildFamilies(data, map) {
+  const cell = (row, key) => (map[key] >= 0 ? String(row[map[key]] ?? '').trim() : '')
+  const groups = new Map()
+  let skipped = 0
+  for (const row of data) {
+    const name = cell(row, 'person')
+    if (!name) {
+      skipped++
+      continue
+    }
+    const familyName = cell(row, 'family') || name
+    const key = plain(familyName)
+    if (!groups.has(key)) {
+      groups.set(key, { name: familyName, head: '', phone: '', origin: '', originKnown: true, party: false, guests: [] })
+    }
+    const f = groups.get(key)
+    f.guests.push({ name, age_group: ageGroup(cell(row, 'age')) })
+    f.head ||= cell(row, 'head')
+    f.phone ||= whatsappNumber(cell(row, 'phone'))
+    if (!f.origin && cell(row, 'origin')) {
+      const o = matchOrigin(cell(row, 'origin'))
+      f.origin = o.origin
+      f.originKnown = o.known
+    }
+    f.party ||= isYes(cell(row, 'party'))
+  }
+  const existing = new Set(F.map((f) => plain(f.name)))
+  const families = [...groups.values()].map((f) => ({
+    ...f,
+    head: f.head || f.guests[0].name,
+    exists: existing.has(plain(f.name)),
+  }))
+  return { families, skipped }
+}
+
+function importGuests() {
+  pop(
+    `<p class="eyebrow">Convidados</p>
+    <h2>Importar planilha</h2>
+    <p>Envie um arquivo .xlsx ou .csv com uma linha por pessoa. Pessoas com o mesmo nome na coluna Família ficam no mesmo convite.</p>
+    <div class="actions">
+      <label class="btn primary file-btn">Escolher arquivo<input type="file" id="sheetFile" accept=".xlsx,.xls,.csv" hidden></label>
+      <button class="btn soft" id="template">Baixar modelo</button>
+    </div>
+    <div id="importArea"></div>`,
+    'wide',
+  )
+  $('#template').onclick = () => downloadTemplate().catch(bad)
+  $('#sheetFile').onchange = async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    try {
+      const sheet = await readSheet(file)
+      importPreview(sheet, guessColumns(sheet.header), file.name)
+    } catch (err) {
+      bad(err)
+    }
+  }
+}
+
+function importPreview(sheet, map, fileName) {
+  const { families, skipped } = buildFamilies(sheet.data, map)
+  const toImport = families.filter((f) => !f.exists)
+  const people = toImport.reduce((n, f) => n + f.guests.length, 0)
+  const unknownOrigins = [...new Set(toImport.filter((f) => !f.originKnown).map((f) => f.origin))]
+  const options = (key) =>
+    `<option value="-1">— não usar —</option>` +
+    sheet.header.map((h, i) => `<option value="${i}" ${map[key] === i ? 'selected' : ''}>${esc(h || `Coluna ${i + 1}`)}</option>`).join('')
+  const selects = IMPORT_FIELDS.map(
+    ([key, label]) => `<label>${label}${key === 'person' ? ' *' : ''}<select data-col="${key}">${options(key)}</select></label>`,
+  ).join('')
+  const warnings = [
+    map.person < 0 && 'Escolha a coluna com o nome de cada pessoa.',
+    skipped && `${skipped} linha(s) sem nome serão ignoradas.`,
+    families.length - toImport.length &&
+      `${families.length - toImport.length} família(s) já cadastrada(s) com o mesmo nome serão ignoradas.`,
+    unknownOrigins.length &&
+      `Origens fora da lista padrão (serão importadas como estão): ${unknownOrigins.map(esc).join(', ')}.`,
+  ].filter(Boolean)
+  const rows = toImport
+    .slice(0, 50)
+    .map(
+      (f) => `<tr>
+        <td><b>${esc(f.name)}</b>${f.party ? '<span class="badge">Padrinhos</span>' : ''}<small>${f.guests
+          .map((g) => esc(g.name) + (g.age_group !== 'adult' ? ` (${AGE_GROUPS[g.age_group].toLowerCase()})` : ''))
+          .join(', ')}</small></td>
+        <td>${esc(f.head)}</td>
+        <td>${esc(f.phone || '—')}</td>
+        <td>${esc(f.origin || '—')}${f.originKnown ? '' : ' <span class="warn">?</span>'}</td>
+      </tr>`,
+    )
+    .join('')
+  $('#importArea').innerHTML = `
+    <p class="note">Arquivo: <b>${esc(fileName)}</b>. Confira de qual coluna vem cada informação:</p>
+    <div class="form map-grid">${selects}</div>
+    ${warnings.map((w) => `<p class="notice-warn">${w}</p>`).join('')}
+    <table class="table preview">
+      <thead><tr><th>Família e pessoas</th><th>Responsável</th><th>WhatsApp</th><th>Origem</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="4" class="empty">Nenhuma família nova para importar.</td></tr>'}</tbody>
+    </table>
+    ${toImport.length > 50 ? `<p class="note">Mostrando 50 de ${toImport.length} famílias.</p>` : ''}
+    <button class="btn primary" id="doImport" ${toImport.length && map.person >= 0 ? '' : 'disabled'}>
+      Importar ${toImport.length} família(s) e ${people} pessoa(s)
+    </button>`
+  document.querySelectorAll('[data-col]').forEach(
+    (s) =>
+      (s.onchange = () => {
+        map[s.dataset.col] = +s.value
+        importPreview(sheet, map, fileName)
+      }),
+  )
+  $('#doImport').onclick = () => saveImport(toImport)
+}
+
+async function saveImport(families) {
+  const button = $('#doImport')
+  button.disabled = true
+  button.textContent = 'Importando...'
+  // IDs criados aqui ligam cada pessoa à sua família sem depender da ordem de retorno do banco.
+  const rows = families.map((f) => ({
+    id: crypto.randomUUID(),
+    wedding_id: W.id,
+    name: f.name,
+    head_name: f.head,
+    phone: f.phone,
+    origin: f.origin,
+    is_wedding_party: f.party,
+    people_count: f.guests.length,
+  }))
+  const guests = families.flatMap((f, i) =>
+    f.guests.map((g, position) => ({ ...g, position, family_id: rows[i].id })),
+  )
+  const r = await sb.from('families').insert(rows)
+  if (r.error) {
+    button.disabled = false
+    button.textContent = 'Tentar novamente'
+    return bad(r.error)
+  }
+  const g = await sb.from('guests').insert(guests)
+  if (g.error) {
+    // Sem as pessoas, as famílias ficariam vazias: desfaz a importação.
+    await sb.from('families').delete().in('id', rows.map((x) => x.id))
+    button.disabled = false
+    button.textContent = 'Tentar novamente'
+    return bad(g.error)
+  }
+  await log('guest', `${rows.length} família(s) e ${guests.length} pessoa(s) importadas da planilha.`)
+  closeModal()
+  toast(`${rows.length} família(s) importadas.`)
+  owner()
 }
 
 function personRow(g = {}) {
