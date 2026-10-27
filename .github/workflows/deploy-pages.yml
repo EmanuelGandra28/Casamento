@@ -26,9 +26,13 @@ jobs:
           if [ -n "$SUPABASE_URL_VALUE" ] && [ -n "$SUPABASE_KEY_VALUE" ]; then
             echo "window.APP_CONFIG = { supabaseUrl: '$SUPABASE_URL_VALUE', supabaseAnonKey: '$SUPABASE_KEY_VALUE', siteUrl: 'https://emanuelgandra28.github.io/Casamento/' };" > config.js
           fi
+      - name: Separar arquivos do site
+        run: |
+          mkdir _site
+          cp index.html app.js styles.css config.js .nojekyll _site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@v4

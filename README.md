@@ -33,4 +33,4 @@ O modelo de mensagem do WhatsApp deve receber o código como primeiro parâmetro
 
 ## Desenvolvimento local
 
-Execute `npm start` e abra `http://localhost:4173`. Para testar no celular na mesma rede, use o IPv4 do computador com a porta `4173`.
+Instale o [Node.js](https://nodejs.org/) (versão LTS), execute `npm start` e abra `http://localhost:4173`. Para testar no celular na mesma rede, use o IPv4 do computador com a porta `4173`.
