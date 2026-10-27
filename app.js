@@ -15,8 +15,10 @@ const localDate = (v) => new Date(v + 'T12:00')
 const dt = (v) => (v ? localDate(v).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' }) : 'A definir')
 
 // W: casamento, G: presentes, F: famílias (com .guests), B: orçamento, A: atualizações,
-// P: informações dos padrinhos, R: reservas de presentes, U: usuário logado, invite: convite aberto pelo link.
+// P: informações dos padrinhos, R: reservas de presentes, V: dados privados (teto do orçamento),
+// U: usuário logado, invite: convite aberto pelo link.
 let R = []
+let V = {}
 let W
 let G = []
 let F = []
@@ -323,15 +325,16 @@ function login() {
 }
 
 async function owner() {
-  const [f, g, b, a, p, rs] = await Promise.all([
+  const [f, g, b, a, p, rs, v] = await Promise.all([
     sb.from('families').select('*, guests(*)').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('gifts').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('budget_items').select('*').eq('wedding_id', W.id).order('due_date'),
     sb.from('activity_log').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }).limit(30),
     sb.from('wedding_party_info').select('*').eq('wedding_id', W.id).maybeSingle(),
     sb.from('gift_reservations').select('*, families(name)').order('created_at'),
+    sb.from('wedding_private').select('*').eq('wedding_id', W.id).maybeSingle(),
   ])
-  const failed = [f, g, b, a, p, rs].find((r) => r.error)
+  const failed = [f, g, b, a, p, rs, v].find((r) => r.error)
   if (failed) bad(failed.error)
   F = (f.data || []).map((x) => ({ ...x, guests: (x.guests || []).sort((m, n) => m.position - n.position) }))
   G = g.data || []
@@ -339,6 +342,7 @@ async function owner() {
   A = a.data || []
   P = p.data || {}
   R = rs.data || []
+  V = v.data || {}
   admin()
 }
 
@@ -815,7 +819,7 @@ function panel() {
   const total = people.length
   const yes = people.filter((g) => g.rsvp_status === 'confirmed').length
   const no = people.filter((g) => g.rsvp_status === 'declined').length
-  const due = B.reduce((n, b) => n + Number(b.amount) - Number(b.amount_paid), 0)
+  const due = B.reduce((n, b) => n + budgetLeft(b), 0)
   const today = new Date()
   today.setHours(12, 0, 0, 0)
   const days = W.event_date ? Math.max(0, Math.round((localDate(W.event_date) - today) / 86400000)) : '—'
@@ -827,13 +831,14 @@ function panel() {
       )
       .join('') || '<p class="empty">As atividades aparecerão aqui.</p>'
   const upcoming =
-    B.filter((b) => +b.amount_paid < +b.amount)
+    B.filter((b) => budgetStatus(b) !== 'paid')
+      .sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999'))
       .slice(0, 4)
       .map(
         (b) =>
-          `<div class="row"><span>${esc(b.name)}<small>${dt(b.due_date)}</small></span><b>${cash(+b.amount - b.amount_paid)}</b></div>`,
+          `<div class="row"><span>${esc(b.name)}<small>${dt(b.due_date)}${dueLabel(b)}</small></span><b>${cash(budgetLeft(b))}</b></div>`,
       )
-      .join('') || '<p class="empty">Nenhum item cadastrado.</p>'
+      .join('') || '<p class="empty">Nenhum pagamento pendente.</p>'
   return `<main class="page">
     <section class="hero">
       <div>
@@ -891,10 +896,10 @@ function originPanel() {
     .join('')
   return `<section class="panel origin-panel">
     <h3>RSVP por origem</h3>
-    <table class="table">
+    <div class="table-wrap"><table class="table">
       <thead><tr><th>Origem</th><th>Pessoas</th><th>Confirmados</th><th>Pendentes</th><th>Não vão</th><th>Confirmação</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>
+    </table></div>
   </section>`
 }
 
@@ -902,6 +907,85 @@ const GUEST_FILTERS = {
   all: ['Todos', () => true],
   party: ['Padrinhos', (f) => f.is_wedding_party],
   pending: ['Pendentes', (f) => f.guests.some((g) => g.rsvp_status === 'pending')],
+}
+
+const isPending = (f) => f.guests.some((g) => g.rsvp_status === 'pending')
+const shortDate = (v) => new Date(v).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })
+
+// Histórico de contato, para não mandar convite ou lembrete repetido.
+function contactLine(f) {
+  if (!f.invite_sent_at && !f.reminder_count) return 'Convite ainda não enviado'
+  const parts = []
+  if (f.invite_sent_at) parts.push(`Convite enviado em ${shortDate(f.invite_sent_at)}`)
+  if (f.reminder_count) parts.push(`${f.reminder_count} lembrete(s), último em ${shortDate(f.reminded_at)}`)
+  return parts.join(' · ')
+}
+
+async function markContact(f, kind) {
+  const now = new Date().toISOString()
+  const change =
+    kind === 'invite' ? { invite_sent_at: now } : { reminded_at: now, reminder_count: (f.reminder_count || 0) + 1 }
+  const r = await sb.from('families').update(change).eq('id', f.id)
+  if (r.error) return bad(r.error)
+  Object.assign(f, change)
+  await log('guest', kind === 'invite' ? `Convite enviado para ${f.name}.` : `Lembrete de RSVP enviado para ${f.name}.`)
+}
+
+function openWhatsApp(f, msg) {
+  const phone = String(f.phone || '').replace(/\D/g, '')
+  window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank')
+}
+
+function reminderMessage(f) {
+  const deadline = W.rsvp_deadline ? ` até ${dt(W.rsvp_deadline)}` : ''
+  return `Olá, ${f.head_name}! Passando para lembrar de confirmar a presença no casamento de ${W.bride} e ${W.groom}${deadline}. É rapidinho, pelo link do seu convite:\n${inviteLink(f)}\n\nObrigado!`
+}
+
+// Aviso quando a família já foi lembrada há pouco tempo.
+function recentReminder(f) {
+  if (!f.reminded_at) return ''
+  const days = Math.floor((Date.now() - new Date(f.reminded_at)) / 86400000)
+  return days < 3 ? (days === 0 ? 'lembrado hoje' : `lembrado há ${days} dia(s)`) : ''
+}
+
+async function sendReminder(f) {
+  const recent = recentReminder(f)
+  if (recent && !confirm(`${f.name} já foi ${recent}. Enviar outro lembrete?`)) return false
+  openWhatsApp(f, reminderMessage(f))
+  await markContact(f, 'reminder')
+  return true
+}
+
+// Lista dos pendentes: o WhatsApp abre um contato por vez, então cada um tem seu botão.
+function remindAll() {
+  const pending = F.filter(isPending)
+  pop(
+    `<p class="eyebrow">Lembretes de RSVP</p>
+    <h2>${pending.length} família(s) sem resposta</h2>
+    <p>Clique em cada família para abrir o WhatsApp com a mensagem pronta. O envio fica registrado.</p>
+    <div class="remind-list">${pending
+      .map(
+        (f) => `<div class="row"><span><b>${esc(f.name)}</b><small>${esc(f.phone || 'sem WhatsApp')} · ${contactLine(f)}${
+          recentReminder(f) ? ` · <b class="warn">${recentReminder(f)}</b>` : ''
+        }</small></span><button class="act" data-send="${f.id}">Enviar lembrete</button></div>`,
+      )
+      .join('')}</div>`,
+    'wide',
+  )
+  document.querySelectorAll('[data-send]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        const sent = await sendReminder(F.find((f) => f.id === b.dataset.send))
+        if (!sent) return
+        b.textContent = 'Enviado ✓'
+        b.disabled = true
+      }),
+  )
+  // Ao fechar, a lista de convidados é redesenhada com o histórico atualizado.
+  $('#close').onclick = () => {
+    closeModal()
+    admin()
+  }
 }
 
 function guestPanel() {
@@ -919,9 +1003,10 @@ function guestPanel() {
         <td>${esc(f.origin || '—')}</td>
         <td><span class="status ${f.rsvp_status}">${RSVP_LABELS[f.rsvp_status] || 'Pendente'}</span>${
           f.rsvp_note ? `<small>“${esc(f.rsvp_note)}”</small>` : ''
-        }</td>
+        }<small class="contact">${contactLine(f)}</small></td>
         <td><div class="actions">
           <button class="act" data-inv="${f.id}">Convite</button>
+          ${isPending(f) ? `<button class="act" data-remind="${f.id}">Lembrar</button>` : ''}
           <button class="act" data-ef="${f.id}">Editar</button>
           <button class="act" data-df="${f.id}">Excluir</button>
         </div></td>
@@ -940,14 +1025,17 @@ function guestPanel() {
       </div>
       <div class="head-actions">
         <button class="btn soft" id="importGuests">Importar planilha</button>
+        <button class="btn soft" id="exportGuests">Exportar Excel</button>
         <button class="btn primary" id="nf">+ Nova família</button>
       </div>
     </div>
-    <div class="toolbar">${filters}</div>
-    <table class="table">
+    <div class="toolbar">${filters}${
+      F.some(isPending) ? `<button class="remind-all" id="remindAll">Lembrar pendentes (${F.filter(isPending).length})</button>` : ''
+    }</div>
+    <div class="table-wrap"><table class="table">
       <thead><tr><th>Família</th><th>Responsável</th><th>Confirmados</th><th>Origem</th><th>RSVP</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>
+    </table></div>
   </main>`
 }
 
@@ -966,33 +1054,151 @@ function giftsPanel() {
   </main>`
 }
 
+const BUDGET_CATEGORIES = [
+  'Cerimônia',
+  'Vestuário',
+  'Beleza',
+  'Fotografia e vídeo',
+  'Decoração e flores',
+  'Música',
+  'Transporte',
+  'Convites',
+  'Alianças',
+  'Lua de mel',
+  'Documentação',
+  'Outros',
+]
+const BUDGET_STATUS = { pending: 'Pendente', partial: 'Parcial', paid: 'Quitado' }
+
+// Valor de referência do item: o contratado, quando houver; senão, o previsto.
+const budgetRef = (b) => (+b.contracted > 0 ? +b.contracted : +b.amount)
+const budgetLeft = (b) => Math.max(budgetRef(b) - +b.amount_paid, 0)
+function budgetStatus(b) {
+  if (budgetRef(b) > 0 && +b.amount_paid >= budgetRef(b)) return 'paid'
+  return +b.amount_paid > 0 ? 'partial' : 'pending'
+}
+
+function daysUntil(date) {
+  if (!date) return null
+  const today = new Date()
+  today.setHours(12, 0, 0, 0)
+  return Math.round((localDate(date) - today) / 86400000)
+}
+
+function dueLabel(b) {
+  const days = daysUntil(b.due_date)
+  if (days === null || budgetStatus(b) === 'paid') return ''
+  if (days < 0) return `<span class="due late">Atrasado há ${-days} dia(s)</span>`
+  if (days === 0) return '<span class="due soon">Vence hoje</span>'
+  if (days <= 7) return `<span class="due soon">Vence em ${days} dia(s)</span>`
+  return ''
+}
+
+function budgetAlerts() {
+  const alerts = []
+  for (const b of B) {
+    if (budgetStatus(b) === 'paid') continue
+    const days = daysUntil(b.due_date)
+    if (days !== null && days < 0) alerts.push(`${b.name}: pagamento atrasado (${cash(budgetLeft(b))}).`)
+    else if (days !== null && days <= 7) alerts.push(`${b.name}: vence ${days === 0 ? 'hoje' : `em ${days} dia(s)`} (${cash(budgetLeft(b))}).`)
+  }
+  for (const b of B) {
+    if (+b.contracted > 0 && +b.amount > 0 && +b.contracted > +b.amount) {
+      alerts.push(`${b.name}: contratado ${cash(+b.contracted - +b.amount)} acima do previsto.`)
+    }
+  }
+  const committed = B.reduce((n, b) => n + budgetRef(b), 0)
+  if (+V.budget_total > 0 && committed > +V.budget_total) {
+    alerts.push(`O orçamento total passou do teto em ${cash(committed - +V.budget_total)}.`)
+  }
+  return alerts
+}
+
 function budgetPanel() {
-  const planned = B.reduce((n, b) => n + +b.amount, 0)
-  const paid = B.reduce((n, b) => n + +b.amount_paid, 0)
+  const sum = (fn) => B.reduce((n, b) => n + fn(b), 0)
+  const planned = sum((b) => +b.amount)
+  const contracted = sum((b) => +b.contracted)
+  const paid = sum((b) => +b.amount_paid)
+  const left = sum(budgetLeft)
+  const committed = sum(budgetRef)
+  const cap = +V.budget_total || 0
+
+  const byCategory = new Map()
+  for (const b of B) {
+    const c = b.category || 'Sem categoria'
+    if (!byCategory.has(c)) byCategory.set(c, { planned: 0, contracted: 0, paid: 0 })
+    const s = byCategory.get(c)
+    s.planned += +b.amount
+    s.contracted += +b.contracted
+    s.paid += +b.amount_paid
+  }
+  const categoryRows = [...byCategory.entries()]
+    .sort(([a], [b]) => {
+      const rank = (c) => (BUDGET_CATEGORIES.includes(c) ? BUDGET_CATEGORIES.indexOf(c) : 99)
+      return rank(a) - rank(b) || a.localeCompare(b)
+    })
+    .map(([c, s]) => {
+      const diff = s.contracted > 0 ? s.contracted - s.planned : 0
+      return `<tr><td><b>${esc(c)}</b></td><td>${cash(s.planned)}</td><td>${cash(s.contracted)}</td><td>${cash(s.paid)}</td>
+        <td class="${diff > 0 ? 'over' : ''}">${diff ? (diff > 0 ? '+' : '−') + cash(Math.abs(diff)) : '—'}</td></tr>`
+    })
+    .join('')
+
+  const items = [...B].sort((a, b) => (a.due_date || '9999').localeCompare(b.due_date || '9999'))
   const rows =
-    B.map(
-      (b) => `<tr>
-        <td><b>${esc(b.name)}</b><small>${esc(b.supplier)}</small></td>
-        <td>${esc(b.category)}</td>
-        <td>${dt(b.due_date)}</td>
+    items
+      .map(
+        (b) => `<tr>
+        <td><b>${esc(b.name)}</b><small>${esc(b.supplier)}${
+          safeUrl(b.link) ? ` · <a href="${esc(b.link)}" target="_blank" rel="noopener">contrato ↗</a>` : ''
+        }</small>${b.notes ? `<small>${esc(b.notes)}</small>` : ''}</td>
+        <td>${esc(b.category || '—')}</td>
+        <td>${b.due_date ? dt(b.due_date) : '—'}${dueLabel(b)}</td>
         <td>${cash(b.amount)}</td>
+        <td>${+b.contracted ? cash(b.contracted) : '—'}</td>
         <td>${cash(b.amount_paid)}</td>
+        <td><span class="status budget-${budgetStatus(b)}">${BUDGET_STATUS[budgetStatus(b)]}</span></td>
+        <td><div class="actions"><button class="act" data-eb="${b.id}">Editar</button><button class="act" data-db="${b.id}">Excluir</button></div></td>
       </tr>`,
-    ).join('') || '<tr><td colspan="5" class="empty">Nenhum item cadastrado.</td></tr>'
+      )
+      .join('') || '<tr><td colspan="8" class="empty">Nenhum item cadastrado.</td></tr>'
+  const alerts = budgetAlerts()
+
   return `<main class="page">
     <div class="head">
       <div><p class="eyebrow">Planejamento privado</p><h2>Orçamento</h2></div>
-      <button class="btn primary" id="nb">+ Novo item</button>
+      <div class="head-actions">
+        <button class="btn soft" id="exportBudget">Exportar Excel</button>
+        <button class="btn primary" id="nb">+ Novo item</button>
+      </div>
     </div>
+    <form class="cap-form" id="capForm">
+      <label>Teto do orçamento<input name="budget_total" type="number" min="0" step="0.01" value="${cap || ''}" placeholder="Opcional"></label>
+      <button class="btn soft">Salvar teto</button>
+    </form>
+    ${alerts.map((a) => `<p class="notice-warn">${esc(a)}</p>`).join('')}
     <section class="cards">
-      <article class="card"><span>Planejado</span><strong>${cash(planned)}</strong></article>
+      <article class="card"><span>Previsto</span><strong>${cash(planned)}</strong></article>
+      <article class="card"><span>Contratado</span><strong>${cash(contracted)}</strong></article>
       <article class="card"><span>Pago</span><strong>${cash(paid)}</strong></article>
-      <article class="card"><span>Restante</span><strong>${cash(planned - paid)}</strong></article>
+      <article class="card"><span>${cap ? 'Disponível no teto' : 'A pagar'}</span><strong>${cash(cap ? cap - committed : left)}</strong></article>
     </section>
-    <table class="table">
-      <thead><tr><th>Item</th><th>Categoria</th><th>Vencimento</th><th>Valor</th><th>Pago</th></tr></thead>
+    ${
+      categoryRows
+        ? `<section class="panel origin-panel">
+            <h3>Por categoria</h3>
+            <div class="table-wrap"><table class="table">
+              <thead><tr><th>Categoria</th><th>Previsto</th><th>Contratado</th><th>Pago</th><th>Contratado − previsto</th></tr></thead>
+              <tbody>${categoryRows}</tbody>
+            </table></div>
+          </section>`
+        : ''
+    }
+    <h3 class="section-title">Itens</h3>
+    <div class="table-wrap"><table class="table">
+      <thead><tr><th>Item</th><th>Categoria</th><th>Vencimento</th><th>Previsto</th><th>Contratado</th><th>Pago</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>
+    </table></div>
   </main>`
 }
 
@@ -1084,6 +1290,14 @@ function bind() {
   if (view === 'guests') {
     $('#nf').onclick = () => family()
     $('#importGuests').onclick = importGuests
+    $('#exportGuests').onclick = () => exportAll().catch(bad)
+    if ($('#remindAll')) $('#remindAll').onclick = remindAll
+    document.querySelectorAll('[data-remind]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          if (await sendReminder(F.find((f) => f.id === b.dataset.remind))) admin()
+        }),
+    )
     document
       .querySelectorAll('[data-ef]')
       .forEach((b) => (b.onclick = () => family(F.find((f) => f.id === b.dataset.ef))))
@@ -1135,7 +1349,30 @@ function bind() {
         }),
     )
   }
-  if (view === 'budget') $('#nb').onclick = () => budget()
+  if (view === 'budget') {
+    $('#nb').onclick = () => budget()
+    $('#exportBudget').onclick = () => exportAll().catch(bad)
+    document.querySelectorAll('[data-eb]').forEach((b) => (b.onclick = () => budget(B.find((x) => x.id === b.dataset.eb))))
+    document.querySelectorAll('[data-db]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const item = B.find((x) => x.id === b.dataset.db)
+          if (!confirm(`Excluir ${item.name} do orçamento?`)) return
+          const r = await sb.from('budget_items').delete().eq('id', item.id)
+          if (r.error) return bad(r.error)
+          await log('payment', `${item.name} foi excluído do orçamento.`)
+          owner()
+        }),
+    )
+    $('#capForm').onsubmit = async (e) => {
+      e.preventDefault()
+      const budget_total = +new FormData(e.target).get('budget_total') || 0
+      const r = await sb.from('wedding_private').upsert({ wedding_id: W.id, budget_total })
+      if (r.error) return bad(r.error)
+      toast('Teto do orçamento salvo.')
+      owner()
+    }
+  }
   if (view === 'settings') {
     const form = $('#set')
     form.onclick = (e) => {
@@ -1273,6 +1510,77 @@ async function downloadTemplate() {
   XLSX.utils.book_append_sheet(book, guests, 'Convidados')
   XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([['Origens aceitas'], ...ORIGINS.map((o) => [o])]), 'Origens')
   XLSX.writeFile(book, 'modelo-convidados.xlsx')
+}
+
+// Planilha com tudo: uma pessoa por linha, famílias, orçamento e presentes.
+async function exportAll() {
+  await loadXlsx()
+  const when = (v) => (v ? new Date(v).toLocaleString('pt-BR') : '')
+  const people = F.flatMap((f) =>
+    f.guests.map((g) => ({
+      Família: f.name,
+      Pessoa: g.name,
+      'Faixa etária': AGE_GROUPS[g.age_group] || '',
+      RSVP: RSVP_LABELS[g.rsvp_status] || '',
+      Responsável: f.head_name,
+      WhatsApp: f.phone,
+      Origem: f.origin,
+      Padrinhos: f.is_wedding_party ? 'Sim' : '',
+    })),
+  )
+  const families = F.map((f) => ({
+    Família: f.name,
+    Responsável: f.head_name,
+    WhatsApp: f.phone,
+    Origem: f.origin,
+    Padrinhos: f.is_wedding_party ? 'Sim' : '',
+    Pessoas: f.guests.length,
+    Confirmados: f.guests.filter((g) => g.rsvp_status === 'confirmed').length,
+    'Não vão': f.guests.filter((g) => g.rsvp_status === 'declined').length,
+    Pendentes: f.guests.filter((g) => g.rsvp_status === 'pending').length,
+    Recado: f.rsvp_note,
+    'Respondeu em': when(f.responded_at),
+    'Convite enviado em': when(f.invite_sent_at),
+    Lembretes: f.reminder_count || 0,
+    'Último lembrete': when(f.reminded_at),
+    'Link do convite': inviteLink(f),
+  }))
+  const budgetRows = B.map((b) => ({
+    Item: b.name,
+    Fornecedor: b.supplier,
+    Categoria: b.category,
+    Previsto: +b.amount,
+    Contratado: +b.contracted,
+    Pago: +b.amount_paid,
+    'A pagar': budgetLeft(b),
+    Status: BUDGET_STATUS[budgetStatus(b)],
+    Vencimento: b.due_date ? localDate(b.due_date).toLocaleDateString('pt-BR') : '',
+    Link: b.link,
+    Observações: b.notes,
+  }))
+  const giftRows = G.map((g) => {
+    const list = R.filter((r) => r.gift_id === g.id)
+    return {
+      Presente: g.name,
+      Tipo: g.kind === 'quota' ? 'Cotas por Pix' : 'Presente único',
+      Valor: +g.price,
+      Cotas: g.kind === 'quota' ? `${g.taken || 0} de ${g.quota_total}` : '',
+      'Escolhido por': list.map((r) => `${r.families?.name || 'Convidado'}${g.kind === 'quota' ? ` (${r.quantity})` : ''}`).join(', '),
+      'Valor presenteado': list.reduce((n, r) => n + r.quantity * +g.price, 0),
+      Recados: list.map((r) => r.message).filter(Boolean).join(' | '),
+    }
+  })
+  const book = XLSX.utils.book_new()
+  const sheet = (rows, name, empty) => {
+    const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ [empty]: '' }])
+    ws['!cols'] = Object.keys(rows[0] || { [empty]: '' }).map((k) => ({ wch: Math.max(12, k.length + 2) }))
+    XLSX.utils.book_append_sheet(book, ws, name)
+  }
+  sheet(people, 'Convidados', 'Nenhum convidado')
+  sheet(families, 'Famílias', 'Nenhuma família')
+  sheet(budgetRows, 'Orçamento', 'Nenhum item')
+  sheet(giftRows, 'Presentes', 'Nenhum presente')
+  XLSX.writeFile(book, `casamento-${new Date().toLocaleDateString('sv-SE')}.xlsx`)
 }
 
 // Lê a primeira aba: a primeira linha preenchida é o cabeçalho.
@@ -1668,31 +1976,38 @@ function gift(g = {}) {
   }
 }
 
-function budget() {
-  pop(`<h2>Novo item do orçamento</h2>
+function budget(b = {}) {
+  const categories = BUDGET_CATEGORIES.map((c) => `<option value="${esc(c)}">`).join('')
+  pop(`<h2>${b.id ? 'Editar' : 'Novo'} item do orçamento</h2>
     <form class="form" id="bud">
-      <label>Item<input name="name" required></label>
+      <label>Item<input name="name" value="${esc(b.name)}" placeholder="Ex.: Fotógrafo" required></label>
       <div class="two">
-        <label>Fornecedor<input name="supplier"></label>
-        <label>Categoria<input name="category"></label>
+        <label>Fornecedor<input name="supplier" value="${esc(b.supplier)}"></label>
+        <label>Categoria<input name="category" value="${esc(b.category)}" list="budgetCategories"><datalist id="budgetCategories">${categories}</datalist></label>
       </div>
       <div class="two">
-        <label>Valor<input name="amount" type="number" step="0.01" required></label>
-        <label>Valor pago<input name="amount_paid" type="number" step="0.01" value="0" required></label>
+        <label>Valor previsto<input name="amount" type="number" min="0" step="0.01" value="${b.amount ?? ''}" required></label>
+        <label>Valor contratado<input name="contracted" type="number" min="0" step="0.01" value="${+b.contracted || ''}" placeholder="Depois de fechar"></label>
       </div>
-      <label>Vencimento<input name="due_date" type="date"></label>
+      <div class="two">
+        <label>Valor já pago<input name="amount_paid" type="number" min="0" step="0.01" value="${b.amount_paid ?? 0}" required></label>
+        <label>Próximo vencimento<input name="due_date" type="date" value="${b.due_date || ''}"></label>
+      </div>
+      <label>Link da proposta, contrato ou comprovante<input name="link" type="url" value="${esc(b.link)}" placeholder="https://..."></label>
+      <label>Observações<textarea name="notes">${esc(b.notes)}</textarea></label>
       <button class="btn primary">Salvar item</button>
     </form>`)
   $('#bud').onsubmit = async (e) => {
     e.preventDefault()
     const d = Object.fromEntries(new FormData(e.target))
-    d.amount = +d.amount
-    d.amount_paid = +d.amount_paid
+    d.amount = +d.amount || 0
+    d.contracted = +d.contracted || 0
+    d.amount_paid = +d.amount_paid || 0
     d.due_date ||= null
     d.wedding_id = W.id
-    const r = await sb.from('budget_items').insert(d)
+    const r = await sb.from('budget_items').upsert(b.id ? { ...d, id: b.id } : d)
     if (r.error) return bad(r.error)
-    await log('payment', `${d.name} foi incluído no orçamento.`)
+    await log('payment', `${d.name} foi ${b.id ? 'atualizado' : 'incluído'} no orçamento.`)
     closeModal()
     owner()
   }
@@ -1747,10 +2062,15 @@ function inviteModal(f) {
     a.click()
   }
   $('#whats').onclick = async () => {
+    if (f.invite_sent_at && !confirm(`O convite já foi enviado em ${shortDate(f.invite_sent_at)}. Enviar de novo?`)) return
     const msg = `Olá, ${f.head_name}! Com muita alegria, convidamos vocês para o casamento de ${W.bride} e ${W.groom}.\n\nConfirme a presença pelo link do seu convite:\n${link}`
-    const phone = String(f.phone || '').replace(/\D/g, '')
-    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank')
-    await log('guest', `Convite enviado para ${f.name}.`)
+    openWhatsApp(f, msg)
+    await markContact(f, 'invite')
+  }
+  // Ao fechar, a lista mostra a data de envio atualizada.
+  $('#close').onclick = () => {
+    closeModal()
+    admin()
   }
 }
 
