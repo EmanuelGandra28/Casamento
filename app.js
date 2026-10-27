@@ -49,6 +49,45 @@ const ORIGINS = [
   'Família Noivo',
 ]
 const TOKEN_KEY = 'casamento:convite'
+const GIFT_BUCKET = 'gift-images'
+const STORES = [
+  [/amazon\.|amzn\./i, 'Amazon'],
+  [/mercadoli[vb]re\.|meli\.la/i, 'Mercado Livre'],
+  [/shopee\./i, 'Shopee'],
+]
+
+// Nome da loja exibido no botão: lojas conhecidas pelo nome, as demais pelo domínio.
+function storeName(url) {
+  const known = STORES.find(([pattern]) => pattern.test(url))
+  if (known) return known[1]
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return 'Loja'
+  }
+}
+
+const giftImageUrl = (path) => (path ? sb.storage.from(GIFT_BUCKET).getPublicUrl(path).data.publicUrl : '')
+
+// Reduz a foto para no máximo `max` px e JPEG, para carregar rápido no celular.
+async function shrinkImage(file, max = 1200) {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(bitmap.width * scale)
+  canvas.height = Math.round(bitmap.height * scale)
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85))
+}
+
+async function removeGiftImage(path) {
+  if (!path) return
+  const r = await sb.storage.from(GIFT_BUCKET).remove([path])
+  if (r.error) console.warn('Imagem antiga não removida:', r.error.message)
+}
 
 const siteUrl = () => cfg.siteUrl || location.origin + location.pathname
 const inviteLink = (f) => `${siteUrl()}#c=${f.access_token}`
@@ -307,19 +346,20 @@ function partySection(p) {
 }
 
 function giftCard(g, manage = false) {
-  const l1 = safeUrl(g.store_link_1)
-  const l2 = safeUrl(g.store_link_2)
-  const links =
-    l1 || l2
-      ? `<div class="links">${l1 ? `<a target="_blank" rel="noopener" href="${esc(l1)}">Loja 1 ↗</a>` : ''}${
-          l2 ? `<a target="_blank" rel="noopener" href="${esc(l2)}">Loja 2 ↗</a>` : ''
-        }</div>`
-      : ''
+  const urls = (g.links || []).map(safeUrl).filter(Boolean)
+  const links = urls.length
+    ? `<div class="links">${urls
+        .map((u) => `<a class="store" target="_blank" rel="noopener" href="${esc(u)}">${esc(storeName(u))} ↗</a>`)
+        .join('')}</div>`
+    : ''
   const actions = manage
     ? `<div class="actions"><button class="act" data-eg="${g.id}">Editar</button><button class="act" data-dg="${g.id}">Excluir</button></div>`
     : ''
+  const picture = g.image_path
+    ? `<img class="gift-img" src="${esc(giftImageUrl(g.image_path))}" alt="${esc(g.name)}" loading="lazy">`
+    : `<div class="emoji">${esc(g.icon || '🎁')}</div>`
   return `<article class="gift">
-    <div class="emoji">${esc(g.icon || '🎁')}</div>
+    ${picture}
     <h3>${esc(g.name)}</h3>
     <p>${esc(g.description)}</p>
     <b>${cash(g.price)}</b>${links}${actions}
@@ -470,7 +510,7 @@ function giftsPanel() {
       <div>
         <p class="eyebrow">Lista de presentes</p>
         <h2>Presentes</h2>
-        <p>Inclua até dois links de lojas.</p>
+        <p>Adicione a foto e quantos links de lojas quiser (Amazon, Mercado Livre, Shopee...).</p>
       </div>
       <button class="btn primary" id="ng">+ Novo presente</button>
     </div>
@@ -581,6 +621,7 @@ function bind() {
           if (!confirm('Excluir este presente?')) return
           const r = await sb.from('gifts').delete().eq('id', b.dataset.dg)
           if (r.error) return bad(r.error)
+          await removeGiftImage(G.find((g) => g.id === b.dataset.dg)?.image_path)
           await log('gift', 'Um presente foi excluído da lista.')
           owner()
         }),
@@ -696,29 +737,110 @@ function family(f = { guests: [] }) {
   }
 }
 
+function linkRow(url = '') {
+  return `<div class="link-row">
+    <input type="url" name="link" value="${esc(url)}" placeholder="https://..." required>
+    <span class="store-tag">${url ? esc(storeName(url)) : ''}</span>
+    <button type="button" class="remove" title="Remover link">×</button>
+  </div>`
+}
+
 function gift(g = {}) {
+  const current = giftImageUrl(g.image_path)
   pop(`<h2>${g.id ? 'Editar' : 'Novo'} presente</h2>
     <form class="form" id="gift">
       <label>Nome<input name="name" value="${esc(g.name)}" required></label>
       <div class="two">
         <label>Valor<input name="price" type="number" step="0.01" value="${g.price || ''}" required></label>
-        <label>Ícone<input name="icon" value="${esc(g.icon || '🎁')}"></label>
+        <label>Ícone (quando não houver imagem)<input name="icon" value="${esc(g.icon || '🎁')}"></label>
       </div>
       <label>Descrição<textarea name="description">${esc(g.description)}</textarea></label>
-      <label>Link da loja 1<input type="url" name="store_link_1" value="${esc(g.store_link_1)}"></label>
-      <label>Link da loja 2<input type="url" name="store_link_2" value="${esc(g.store_link_2)}"></label>
-      <button class="btn primary">Salvar presente</button>
+      <div>
+        <p class="eyebrow">Imagem do presente</p>
+        <div class="image-pick">
+          <img id="giftPreview" alt="" ${current ? `src="${esc(current)}"` : 'hidden'}>
+          <div class="image-actions">
+            <label class="btn soft">${current ? 'Trocar imagem' : 'Anexar imagem'}<input type="file" id="giftFile" accept="image/*" hidden></label>
+            <button type="button" class="back" id="giftNoImage" ${current ? '' : 'hidden'}>Remover imagem</button>
+          </div>
+        </div>
+      </div>
+      <div>
+        <p class="eyebrow">Links das lojas</p>
+        <div class="link-rows" id="links">${(g.links || []).map(linkRow).join('')}</div>
+        <button type="button" class="back" id="addLink">+ Adicionar link</button>
+      </div>
+      <button class="btn primary" id="saveGift">Salvar presente</button>
     </form>`)
+
+  let file = null
+  let dropImage = false
+  const preview = $('#giftPreview')
+  $('#giftFile').onchange = (e) => {
+    file = e.target.files[0] || null
+    if (!file) return
+    dropImage = false
+    preview.src = URL.createObjectURL(file)
+    preview.hidden = false
+    $('#giftNoImage').hidden = false
+  }
+  $('#giftNoImage').onclick = () => {
+    file = null
+    dropImage = true
+    $('#giftFile').value = ''
+    preview.removeAttribute('src')
+    preview.hidden = true
+    $('#giftNoImage').hidden = true
+  }
+
+  const links = $('#links')
+  $('#addLink').onclick = () => {
+    links.insertAdjacentHTML('beforeend', linkRow())
+    links.lastElementChild.querySelector('input').focus()
+  }
+  links.onclick = (e) => {
+    if (e.target.classList.contains('remove')) e.target.closest('.link-row').remove()
+  }
+  links.oninput = (e) => {
+    const tag = e.target.closest('.link-row')?.querySelector('.store-tag')
+    if (tag) tag.textContent = safeUrl(e.target.value) ? storeName(e.target.value) : ''
+  }
+
   $('#gift').onsubmit = async (e) => {
     e.preventDefault()
-    const d = Object.fromEntries(new FormData(e.target))
-    d.price = +d.price
-    d.wedding_id = W.id
-    const r = await sb.from('gifts').upsert(g.id ? { ...d, id: g.id } : d)
-    if (r.error) return bad(r.error)
-    await log('gift', `${d.name} foi ${g.id ? 'atualizado' : 'adicionado'} à lista.`)
-    closeModal()
-    owner()
+    const form = new FormData(e.target)
+    const button = $('#saveGift')
+    button.disabled = true
+    button.textContent = 'Salvando...'
+    try {
+      let image_path = dropImage ? '' : g.image_path || ''
+      if (file) {
+        const blob = await shrinkImage(file)
+        const path = `${W.id}/${crypto.randomUUID()}.jpg`
+        const up = await sb.storage.from(GIFT_BUCKET).upload(path, blob, { contentType: 'image/jpeg' })
+        if (up.error) throw up.error
+        image_path = path
+      }
+      const d = {
+        name: form.get('name'),
+        price: +form.get('price'),
+        icon: form.get('icon'),
+        description: form.get('description'),
+        links: form.getAll('link').map((u) => u.trim()).filter(Boolean),
+        image_path,
+        wedding_id: W.id,
+      }
+      const r = await sb.from('gifts').upsert(g.id ? { ...d, id: g.id } : d)
+      if (r.error) throw r.error
+      if (g.image_path && g.image_path !== image_path) await removeGiftImage(g.image_path)
+      await log('gift', `${d.name} foi ${g.id ? 'atualizado' : 'adicionado'} à lista.`)
+      closeModal()
+      owner()
+    } catch (err) {
+      bad(err)
+      button.disabled = false
+      button.textContent = 'Salvar presente'
+    }
   }
 }
 
