@@ -278,6 +278,139 @@ async function out() {
   boot()
 }
 
+// ---------- Página do convidado: agenda, como chegar, dress code e FAQ ----------
+
+const destination = () => [W.location, W.address].filter(Boolean).join(', ')
+const multiline = (v) => esc(v).replace(/\n/g, '<br>')
+
+// Evento na agenda: com horário, dura 2 horas; sem horário, ocupa o dia inteiro.
+// O Brasil não tem horário de verão desde 2019, então o fuso é sempre UTC-3.
+function calendarEvent() {
+  if (!W.event_date) return null
+  const title = `Casamento de ${W.bride} & ${W.groom}`
+  const details = `${title}. Mais informações: ${siteUrl()}`
+  if (!W.event_time) {
+    const day = W.event_date.replace(/-/g, '')
+    const next = new Date(localDate(W.event_date).getTime() + 86400000).toLocaleDateString('sv-SE').replace(/-/g, '')
+    return { title, details, allDay: true, start: day, end: next }
+  }
+  const start = new Date(`${W.event_date}T${W.event_time.slice(0, 5)}:00-03:00`)
+  const end = new Date(start.getTime() + 2 * 3600000)
+  const utc = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
+  return { title, details, allDay: false, start: utc(start), end: utc(end) }
+}
+
+function googleCalendarUrl(ev) {
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: ev.title,
+    dates: `${ev.start}/${ev.end}`,
+    details: ev.details,
+    location: destination(),
+    ctz: 'America/Sao_Paulo',
+  })
+  return `https://calendar.google.com/calendar/render?${params}`
+}
+
+// Arquivo .ics: abre direto na agenda do iPhone, Outlook e outros apps.
+function downloadIcs(ev) {
+  const text = (v) => String(v).replace(/[\\,;]/g, (c) => '\\' + c).replace(/\n/g, '\\n')
+  const when = ev.allDay
+    ? [`DTSTART;VALUE=DATE:${ev.start}`, `DTEND;VALUE=DATE:${ev.end}`]
+    : [`DTSTART:${ev.start}`, `DTEND:${ev.end}`]
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Casamento//PT-BR',
+    'BEGIN:VEVENT',
+    `UID:${W.id}@casamento`,
+    `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}`,
+    ...when,
+    `SUMMARY:${text(ev.title)}`,
+    `DESCRIPTION:${text(ev.details)}`,
+    `LOCATION:${text(destination())}`,
+    'BEGIN:VALARM',
+    'TRIGGER:-P1D',
+    'ACTION:DISPLAY',
+    `DESCRIPTION:${text(ev.title)} é amanhã!`,
+    'END:VALARM',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }))
+  a.download = 'casamento.ics'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+}
+
+function countdownText() {
+  if (!W.event_date) return ''
+  const today = new Date()
+  today.setHours(12, 0, 0, 0)
+  const days = Math.round((localDate(W.event_date) - today) / 86400000)
+  if (days > 1) return `Faltam ${days} dias`
+  if (days === 1) return 'É amanhã!'
+  if (days === 0) return 'É hoje!'
+  return ''
+}
+
+function arrivalSection() {
+  const dest = destination()
+  if (!dest) return ''
+  const q = encodeURIComponent(dest)
+  return `<section class="public-section">
+    <p class="eyebrow">Como chegar</p>
+    <h2>${esc(W.location || 'Local da cerimônia')}</h2>
+    ${W.address ? `<p class="note">${esc(W.address)}</p>` : ''}
+    <div class="route">
+      <iframe class="map" title="Mapa do local" loading="lazy" referrerpolicy="no-referrer-when-downgrade"
+        src="https://maps.google.com/maps?q=${q}&output=embed"></iframe>
+      <div>
+        <div class="links">
+          <a class="store" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${q}">Google Maps ↗</a>
+          <a class="store" target="_blank" rel="noopener" href="https://waze.com/ul?q=${q}&navigate=yes">Waze ↗</a>
+          <a class="store" target="_blank" rel="noopener" href="https://m.uber.com/ul/?action=setPickup&pickup=my_location&dropoff[formatted_address]=${q}">Uber ↗</a>
+        </div>
+        ${W.arrival_notes ? `<p class="arrival">${multiline(W.arrival_notes)}</p>` : ''}
+      </div>
+    </div>
+  </section>`
+}
+
+const isHex = (c) => /^#[0-9a-f]{6}$/i.test(c)
+
+function dressSection() {
+  const palette = (W.dress_palette || []).filter(isHex)
+  const avoid = (W.dress_avoid || []).filter(isHex)
+  if (!W.dress_code && !palette.length && !avoid.length && !W.dress_tips) return ''
+  const swatches = (colors, cls) =>
+    `<div class="swatches">${colors.map((c) => `<span class="swatch ${cls}" style="background:${esc(c)}" title="${esc(c)}"></span>`).join('')}</div>`
+  return `<section class="public-section">
+    <p class="eyebrow">Dress code</p>
+    <h2>O que vestir</h2>
+    ${W.dress_code ? `<p class="lead">${multiline(W.dress_code)}</p>` : ''}
+    <div class="info">
+      ${palette.length ? `<article><h3>Cores sugeridas</h3>${swatches(palette, '')}</article>` : ''}
+      ${avoid.length ? `<article><h3>Cores a evitar</h3>${swatches(avoid, 'avoid')}</article>` : ''}
+      ${W.dress_tips ? `<article><h3>Dicas</h3><p>${multiline(W.dress_tips)}</p></article>` : ''}
+    </div>
+  </section>`
+}
+
+function faqSection() {
+  // Perguntas ainda sem resposta (como as sugeridas) ficam fora da página.
+  const faq = (W.faq || []).filter((f) => f.q && f.a)
+  if (!faq.length) return ''
+  return `<section class="public-section">
+    <p class="eyebrow">Dúvidas</p>
+    <h2>Perguntas frequentes</h2>
+    <div class="faq">${faq
+      .map((f) => `<details><summary>${esc(f.q)}</summary><p>${multiline(f.a)}</p></details>`)
+      .join('')}</div>
+  </section>`
+}
+
 async function publicPage() {
   const r = await sb.from('gifts').select('*').eq('wedding_id', W.id).order('created_at')
   G = r.data || []
@@ -293,12 +426,15 @@ async function publicPage() {
     ? `<button id="guest" class="btn primary">${answered ? 'Ver ou alterar resposta' : 'Confirmar presença'}</button>
        ${answered ? `<p class="note">${rsvpSummary(invite.guests)}</p>` : ''}`
     : '<p class="note">Para confirmar presença, use o link enviado no seu convite.</p>'
+  const ev = calendarEvent()
+  const countdown = countdownText()
   app(`<div class="public" ${bg}>
     <nav class="public-nav"><b>${esc(W.bride)} & ${esc(W.groom)}</b><button id="admin">Área dos noivos</button></nav>
     <section class="public-hero">
       <p class="eyebrow">${invite ? `Convite para ${esc(invite.family.name)}` : 'Nosso casamento'}</p>
       <h1>${esc(W.bride)}<br>& ${esc(W.groom)}</h1>
       <p>${when}</p>
+      ${countdown ? `<p class="countdown">${countdown}</p>` : ''}
       ${cta}
     </section>
     ${invite?.family.is_wedding_party ? partySection(invite.party || {}) : ''}
@@ -306,11 +442,29 @@ async function publicPage() {
       <p class="eyebrow">O grande dia</p>
       <h2>Informações para você</h2>
       <div class="info">
-        <article><h3>Quando</h3><p>${dt(W.event_date)}<br>${W.event_time ? W.event_time.slice(0, 5) : ''}</p></article>
+        <article>
+          <h3>Quando</h3>
+          <p>${dt(W.event_date)}<br>${W.event_time ? W.event_time.slice(0, 5) : ''}</p>
+          ${
+            ev
+              ? `<div class="links">
+                  <a class="store" target="_blank" rel="noopener" href="${esc(googleCalendarUrl(ev))}">Google Agenda ↗</a>
+                  <button class="store" id="ics">iPhone / Outlook</button>
+                </div>`
+              : ''
+          }
+        </article>
         <article><h3>Onde</h3><p>${esc(W.location || 'Local a definir')}<br>${esc(W.address)}</p></article>
-        <article><h3>Dress code</h3><p>${esc(W.dress_code || 'Em breve, os noivos compartilharão as orientações.')}</p></article>
+        ${
+          W.rsvp_deadline
+            ? `<article><h3>Confirmação</h3><p>Confirme sua presença até ${dt(W.rsvp_deadline)}, pelo link do seu convite.</p></article>`
+            : ''
+        }
       </div>
     </section>
+    ${arrivalSection()}
+    ${dressSection()}
+    ${faqSection()}
     <section class="public-section">
       <p class="eyebrow">Lista de presentes</p>
       <h2>Com carinho</h2>
@@ -320,6 +474,7 @@ async function publicPage() {
   </div>`)
   $('#admin').onclick = () => (U && W.owner_id === U.id ? owner() : login())
   if (invite) $('#guest').onclick = rsvp
+  if (ev) $('#ics').onclick = () => downloadIcs(ev)
 }
 
 function rsvpSummary(guests) {
@@ -593,6 +748,28 @@ function budgetPanel() {
   </main>`
 }
 
+const FAQ_SUGGESTIONS = [
+  'Posso levar crianças?',
+  'Tem estacionamento no local?',
+  'Que horas devo chegar?',
+  'Até quando posso confirmar presença?',
+  'Como funciona a lista de presentes?',
+]
+
+function faqRow(item = {}) {
+  return `<div class="faq-row">
+    <div class="faq-fields">
+      <input name="faq_q" value="${esc(item.q)}" placeholder="Pergunta">
+      <textarea name="faq_a" placeholder="Resposta">${esc(item.a)}</textarea>
+    </div>
+    <button type="button" class="remove" title="Remover pergunta">×</button>
+  </div>`
+}
+
+function colorChip(name, color = '#c8d2bd') {
+  return `<span class="color-chip"><input type="color" name="${name}" value="${esc(color)}"><button type="button" class="remove" title="Remover cor">×</button></span>`
+}
+
 function settingsPanel() {
   const font = (name) => `<option ${W.title_font === name ? 'selected' : ''}>${name}</option>`
   return `<main class="page">
@@ -607,9 +784,23 @@ function settingsPanel() {
           <label>Data<input type="date" name="event_date" value="${W.event_date || ''}"></label>
           <label>Horário<input type="time" name="event_time" value="${W.event_time?.slice(0, 5) || ''}"></label>
         </div>
-        <label>Local<input name="location" value="${esc(W.location)}"></label>
-        <label>Endereço/orientações<input name="address" value="${esc(W.address)}"></label>
-        <label>Dress code<textarea name="dress_code">${esc(W.dress_code)}</textarea></label>
+        <label>Local<input name="location" value="${esc(W.location)}" placeholder="Ex.: Rancho Mineiro"></label>
+        <label>Endereço (usado no mapa e nas rotas)<input name="address" value="${esc(W.address)}" placeholder="Rua, número, bairro, cidade"></label>
+        <label>Como chegar: estacionamento, entrada, desembarque<textarea name="arrival_notes">${esc(W.arrival_notes)}</textarea></label>
+        <h3>Dress code</h3>
+        <label>Traje e explicação<textarea name="dress_code" placeholder="Ex.: Esporte fino. Cerimônia ao ar livre, à tarde.">${esc(W.dress_code)}</textarea></label>
+        <div class="two">
+          <div><p class="eyebrow">Cores sugeridas</p><div class="color-list" id="paletteList" data-name="dress_palette">${(W.dress_palette || []).filter(isHex).map((c) => colorChip('dress_palette', c)).join('')}<button type="button" class="add-color" data-add="paletteList">+</button></div></div>
+          <div><p class="eyebrow">Cores a evitar</p><div class="color-list" id="avoidList" data-name="dress_avoid">${(W.dress_avoid || []).filter(isHex).map((c) => colorChip('dress_avoid', c)).join('')}<button type="button" class="add-color" data-add="avoidList">+</button></div></div>
+        </div>
+        <label>Dicas práticas<textarea name="dress_tips" placeholder="Ex.: Cerimônia no gramado: prefira salto grosso ou sapatilha.">${esc(W.dress_tips)}</textarea></label>
+        <h3>Perguntas frequentes</h3>
+        <div class="faq-rows" id="faqRows">${(W.faq || []).map(faqRow).join('')}</div>
+        <div class="head-actions">
+          <button type="button" class="back" id="addFaq">+ Adicionar pergunta</button>
+          <button type="button" class="back" id="suggestFaq">Sugerir perguntas comuns</button>
+        </div>
+        <h3>Aparência</h3>
         <div class="two">
           <label>Cor principal<input type="color" name="primary_color" value="${esc(W.primary_color)}"></label>
           <label>Cor secundária<input type="color" name="secondary_color" value="${esc(W.secondary_color)}"></label>
@@ -675,9 +866,41 @@ function bind() {
   }
   if (view === 'budget') $('#nb').onclick = () => budget()
   if (view === 'settings') {
-    $('#set').onsubmit = async (e) => {
+    const form = $('#set')
+    form.onclick = (e) => {
+      const remove = e.target.closest('.remove')
+      if (remove) remove.closest('.faq-row, .color-chip')?.remove()
+      const add = e.target.closest('[data-add]')
+      if (add) {
+        const list = $('#' + add.dataset.add)
+        add.insertAdjacentHTML('beforebegin', colorChip(list.dataset.name))
+      }
+    }
+    $('#addFaq').onclick = () => {
+      $('#faqRows').insertAdjacentHTML('beforeend', faqRow())
+      $('#faqRows').lastElementChild.querySelector('input').focus()
+    }
+    $('#suggestFaq').onclick = () => {
+      const current = [...form.querySelectorAll('[name=faq_q]')].map((i) => plain(i.value))
+      const missing = FAQ_SUGGESTIONS.filter((q) => !current.includes(plain(q)))
+      if (!missing.length) return toast('As perguntas sugeridas já estão na lista.')
+      $('#faqRows').insertAdjacentHTML('beforeend', missing.map((q) => faqRow({ q })).join(''))
+      toast('Perguntas adicionadas. Preencha as respostas e salve.')
+    }
+    form.onsubmit = async (e) => {
       e.preventDefault()
-      const d = Object.fromEntries(new FormData(e.target))
+      const fd = new FormData(e.target)
+      const answers = fd.getAll('faq_a')
+      const lists = {
+        faq: fd
+          .getAll('faq_q')
+          .map((q, i) => ({ q: q.trim(), a: String(answers[i] || '').trim() }))
+          .filter((f) => f.q),
+        dress_palette: fd.getAll('dress_palette'),
+        dress_avoid: fd.getAll('dress_avoid'),
+      }
+      for (const key of ['faq_q', 'faq_a', 'dress_palette', 'dress_avoid']) fd.delete(key)
+      const d = { ...Object.fromEntries(fd), ...lists }
       // Campos de data/hora vazios precisam ir como null para o Postgres.
       d.event_date ||= null
       d.event_time ||= null

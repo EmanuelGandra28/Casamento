@@ -499,7 +499,7 @@ button {
   margin-top: 12px;
 }
 
-.links a.store {
+.links .store {
   padding: 7px 11px;
   border: 1px solid var(--p);
   border-radius: 7px;
@@ -507,9 +507,11 @@ button {
   font-weight: 700;
   color: var(--p);
   text-decoration: none;
+  background: transparent;
+  cursor: pointer;
 }
 
-.links a.store:hover {
+.links .store:hover {
   background: var(--p);
   color: #fff;
 }
@@ -969,6 +971,164 @@ button {
 
 .bar i.declined {
   background: #c99089;
+}
+
+.countdown {
+  font: 500 20px var(--title);
+  color: var(--p) !important;
+  margin: 0 0 18px;
+}
+
+.lead {
+  max-width: 640px;
+  color: #53615d;
+  line-height: 1.7;
+  margin: 0 0 18px;
+}
+
+.route {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 22px;
+  align-items: start;
+}
+
+.map {
+  width: 100%;
+  height: 300px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.arrival {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.swatch {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid #0000001a;
+  position: relative;
+}
+
+/* Cores a evitar: risco diagonal sobre a cor. */
+.swatch.avoid::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: #9e6963;
+  transform: rotate(45deg);
+}
+
+.faq {
+  display: grid;
+  gap: 8px;
+  max-width: 760px;
+}
+
+.faq details {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.faq summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.faq details p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.faq-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.faq-row {
+  display: grid;
+  grid-template-columns: 1fr 38px;
+  gap: 8px;
+}
+
+.faq-fields {
+  display: grid;
+  gap: 6px;
+}
+
+.faq-fields textarea {
+  min-height: 55px;
+}
+
+.faq-row .remove,
+.color-chip .remove {
+  border: 0;
+  border-radius: 7px;
+  background: #f3f0eb;
+  font-size: 18px;
+  color: var(--muted);
+}
+
+.color-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.color-chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.form .color-chip input {
+  width: 42px;
+  height: 38px;
+  padding: 3px;
+}
+
+.color-chip .remove {
+  width: 24px;
+  height: 38px;
+}
+
+.add-color {
+  width: 38px;
+  height: 38px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font-size: 18px;
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .route {
+    grid-template-columns: 1fr;
+  }
+
+  .map {
+    height: 240px;
+  }
 }
 
 @media (max-width:900px) {
