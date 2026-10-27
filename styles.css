@@ -721,8 +721,9 @@ button {
   margin-left: 6px;
   padding: 3px 7px;
   border-radius: 9px;
-  background: var(--s);
-  color: var(--ink);
+  border: 1px solid var(--line);
+  background: #f3f0eb;
+  color: #566460;
   font-size: 9px;
   font-weight: 700;
   vertical-align: middle;
@@ -1203,4 +1204,81 @@ button {
   .two {
     grid-template-columns: 1fr;
   }
+}
+
+/* Garante que o atributo hidden vença regras como .form label { display: grid }. */
+[hidden] {
+  display: none !important;
+}
+
+.gift {
+  display: flex;
+  flex-direction: column;
+}
+
+.gift .badge {
+  align-self: flex-start;
+  margin: 10px 0 0;
+}
+
+.gift b small {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.gift .pick {
+  margin-top: 14px;
+  align-self: flex-start;
+}
+
+.gift.is-taken {
+  opacity: 0.6;
+}
+
+.gift.free {
+  background: linear-gradient(135deg, #fffdf9, #f6efe6);
+}
+
+.quota-count {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.mine {
+  margin: 12px 0 0;
+  color: #638056 !important;
+  font-weight: 700;
+}
+
+.taken-label {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px !important;
+  font-style: italic;
+}
+
+.reservations {
+  margin-top: 10px;
+  border-top: 1px solid #f0ece7;
+}
+
+.reservations .row {
+  font-size: 11px;
+}
+
+.pix {
+  text-align: center;
+}
+
+.pix .qr canvas {
+  width: 210px;
+  height: 210px;
+}
+
+.pix-amount {
+  font: 600 24px var(--title);
+  margin: 6px 0;
+  color: var(--ink) !important;
 }

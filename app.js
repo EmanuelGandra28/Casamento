@@ -15,7 +15,8 @@ const localDate = (v) => new Date(v + 'T12:00')
 const dt = (v) => (v ? localDate(v).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' }) : 'A definir')
 
 // W: casamento, G: presentes, F: famílias (com .guests), B: orçamento, A: atualizações,
-// P: informações dos padrinhos, U: usuário logado, invite: convite aberto pelo link.
+// P: informações dos padrinhos, R: reservas de presentes, U: usuário logado, invite: convite aberto pelo link.
+let R = []
 let W
 let G = []
 let F = []
@@ -64,6 +65,78 @@ function storeName(url) {
     return new URL(url).hostname.replace(/^www\./, '')
   } catch {
     return 'Loja'
+  }
+}
+
+// ---------- Pix (BR Code estático do Banco Central) ----------
+
+const PIX_KEY_TYPES = { cpf: 'CPF', cnpj: 'CNPJ', phone: 'Celular', email: 'E-mail', random: 'Chave aleatória' }
+
+const ascii = (v, max) =>
+  String(v ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^\x20-\x7E]/g, '')
+    .trim()
+    .slice(0, max)
+
+function pixKey() {
+  const key = String(W.pix_key || '').trim()
+  if (W.pix_key_type === 'cpf' || W.pix_key_type === 'cnpj') return key.replace(/\D/g, '')
+  if (W.pix_key_type === 'phone') return '+55' + key.replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '')
+  if (W.pix_key_type === 'email') return key.toLowerCase()
+  return key
+}
+
+const pixReady = () => !!(W.pix_key && W.pix_name && W.pix_city)
+
+// CRC16-CCITT (polinômio 0x1021, início 0xFFFF), exigido no campo 63 do BR Code.
+function crc16(text) {
+  let crc = 0xffff
+  for (let i = 0; i < text.length; i++) {
+    crc ^= text.charCodeAt(i) << 8
+    for (let bit = 0; bit < 8; bit++) crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0')
+}
+
+// Código "copia e cola". Sem valor, o convidado digita o valor no app do banco.
+function pixPayload(amount) {
+  const field = (id, value) => id + String(value.length).padStart(2, '0') + value
+  const account = field('00', 'br.gov.bcb.pix') + field('01', pixKey())
+  const body =
+    field('00', '01') +
+    field('26', account) +
+    field('52', '0000') +
+    field('53', '986') +
+    (amount > 0 ? field('54', Number(amount).toFixed(2)) : '') +
+    field('58', 'BR') +
+    field('59', ascii(W.pix_name, 25)) +
+    field('60', ascii(W.pix_city, 15)) +
+    field('62', field('05', '***')) +
+    '6304'
+  return body + crc16(body)
+}
+
+// Mostra QR Code e copia-e-cola do Pix dentro de `target`.
+function renderPix(target, amount, note = '') {
+  const code = pixPayload(amount)
+  target.innerHTML = `<div class="pix">
+    <div class="qr" id="pixQr"></div>
+    <p class="pix-amount">${amount > 0 ? cash(amount) : 'Valor livre'}</p>
+    <p class="note">Abra o app do seu banco, escolha Pix e leia o QR Code ou use o copia e cola.${note ? ' ' + note : ''}</p>
+    <div class="invite-link"><input id="pixCode" value="${esc(code)}" readonly><button type="button" class="btn soft" id="pixCopy">Copiar</button></div>
+    <p class="note">Recebedor: <b>${esc(W.pix_name)}</b> · ${esc(PIX_KEY_TYPES[W.pix_key_type] || 'Chave')}</p>
+  </div>`
+  target.querySelector('#pixQr').append(qrCanvas(code, 5))
+  target.querySelector('#pixCopy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(code)
+    } catch {
+      target.querySelector('#pixCode').select()
+      document.execCommand('copy')
+    }
+    toast('Código Pix copiado.')
   }
 }
 
@@ -250,20 +323,22 @@ function login() {
 }
 
 async function owner() {
-  const [f, g, b, a, p] = await Promise.all([
+  const [f, g, b, a, p, rs] = await Promise.all([
     sb.from('families').select('*, guests(*)').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('gifts').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('budget_items').select('*').eq('wedding_id', W.id).order('due_date'),
     sb.from('activity_log').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }).limit(30),
     sb.from('wedding_party_info').select('*').eq('wedding_id', W.id).maybeSingle(),
+    sb.from('gift_reservations').select('*, families(name)').order('created_at'),
   ])
-  const failed = [f, g, b, a, p].find((r) => r.error)
+  const failed = [f, g, b, a, p, rs].find((r) => r.error)
   if (failed) bad(failed.error)
   F = (f.data || []).map((x) => ({ ...x, guests: (x.guests || []).sort((m, n) => m.position - n.position) }))
   G = g.data || []
   B = b.data || []
   A = a.data || []
   P = p.data || {}
+  R = rs.data || []
   admin()
 }
 
@@ -468,13 +543,16 @@ async function publicPage() {
     <section class="public-section">
       <p class="eyebrow">Lista de presentes</p>
       <h2>Com carinho</h2>
-      <div class="grid">${G.map((g) => giftCard(g)).join('') || '<p class="empty">A lista será publicada em breve.</p>'}</div>
+      <div class="grid">${
+        G.map((g) => giftCard(g)).join('') + freeGiftCard() || '<p class="empty">A lista será publicada em breve.</p>'
+      }</div>
     </section>
     <footer class="footer">Feito com carinho para celebrar um novo capítulo.</footer>
   </div>`)
   $('#admin').onclick = () => (U && W.owner_id === U.id ? owner() : login())
   if (invite) $('#guest').onclick = rsvp
   if (ev) $('#ics').onclick = () => downloadIcs(ev)
+  bindGiftActions()
 }
 
 function rsvpSummary(guests) {
@@ -500,25 +578,194 @@ function partySection(p) {
   </section>`
 }
 
-function giftCard(g, manage = false) {
+const giftLimit = (g) => (g.kind === 'quota' ? g.quota_total : 1)
+const giftLeft = (g) => Math.max(giftLimit(g) - (g.taken || 0), 0)
+
+function storeLinks(g) {
   const urls = (g.links || []).map(safeUrl).filter(Boolean)
-  const links = urls.length
+  return urls.length
     ? `<div class="links">${urls
         .map((u) => `<a class="store" target="_blank" rel="noopener" href="${esc(u)}">${esc(storeName(u))} ↗</a>`)
         .join('')}</div>`
     : ''
-  const actions = manage
-    ? `<div class="actions"><button class="act" data-eg="${g.id}">Editar</button><button class="act" data-dg="${g.id}">Excluir</button></div>`
-    : ''
+}
+
+function quotaBar(g) {
+  return `<div class="bar"><i class="confirmed" style="width:${(100 * (g.taken || 0)) / g.quota_total}%"></i></div>
+    <small class="quota-count">${g.taken || 0} de ${g.quota_total} cotas presenteadas</small>`
+}
+
+const mineGift = (g) => (invite?.reservations || []).some((r) => r.gift_id === g.id)
+
+// O que o convidado vê e pode fazer em cada presente.
+function guestGiftActions(g) {
+  const mine = (invite?.reservations || []).filter((r) => r.gift_id === g.id)
+  const mineQty = mine.reduce((n, r) => n + r.quantity, 0)
+  const parts = []
+  if (mine.length) {
+    parts.push(
+      `<p class="mine">${g.kind === 'quota' ? `Vocês reservaram ${mineQty} cota(s).` : 'Vocês escolheram este presente.'}</p>`,
+    )
+    const buttons = mine
+      .map(
+        (r) =>
+          `${g.kind === 'quota' ? `<button class="act" data-pix="${r.id}">Ver Pix</button>` : ''}<button class="act" data-cancel="${r.id}">Desistir</button>`,
+      )
+      .join('')
+    parts.push(`<div class="actions">${buttons}</div>`)
+  }
+  if (giftLeft(g) > 0) {
+    if (g.kind === 'quota' ? pixReady() : true) {
+      const label = g.kind === 'quota' ? (mine.length ? 'Presentear mais cotas' : 'Presentear com Pix') : 'Vou dar este presente'
+      parts.push(`<button class="btn primary pick" data-pick="${g.id}">${label}</button>`)
+    }
+  } else if (!mine.length) {
+    parts.push(`<p class="taken-label">${g.kind === 'quota' ? 'Todas as cotas já foram presenteadas' : 'Já escolhido'}</p>`)
+  }
+  return parts.join('')
+}
+
+// Para os noivos: quem escolheu e o botão para liberar a reserva.
+function ownerGiftStatus(g) {
+  const list = R.filter((r) => r.gift_id === g.id)
+  if (!list.length) return '<p class="taken-label">Ninguém escolheu ainda.</p>'
+  return `<div class="reservations">${list
+    .map(
+      (r) => `<div class="row"><span>${esc(r.families?.name || 'Convidado')}${
+        g.kind === 'quota' ? ` · ${r.quantity} cota(s) · ${cash(r.quantity * g.price)}` : ''
+      }${r.message ? `<small>“${esc(r.message)}”</small>` : ''}</span><button class="act" data-release="${r.id}">Liberar</button></div>`,
+    )
+    .join('')}</div>`
+}
+
+function giftCard(g, manage = false) {
   const picture = g.image_path
     ? `<img class="gift-img" src="${esc(giftImageUrl(g.image_path))}" alt="${esc(g.name)}" loading="lazy">`
     : `<div class="emoji">${esc(g.icon || '🎁')}</div>`
-  return `<article class="gift">
+  const price = g.kind === 'quota' ? `${cash(g.price)} <small>por cota</small>` : cash(g.price)
+  const soldOut = giftLeft(g) === 0
+  return `<article class="gift ${soldOut ? 'is-taken' : ''}">
     ${picture}
+    ${g.kind === 'quota' ? '<span class="badge">Cotas por Pix</span>' : ''}
     <h3>${esc(g.name)}</h3>
     <p>${esc(g.description)}</p>
-    <b>${cash(g.price)}</b>${links}${actions}
+    <b>${price}</b>
+    ${g.kind === 'quota' ? quotaBar(g) : ''}
+    ${g.kind === 'item' && (!soldOut || manage || mineGift(g)) ? storeLinks(g) : ''}
+    ${
+      manage
+        ? `${ownerGiftStatus(g)}<div class="actions"><button class="act" data-eg="${g.id}">Editar</button><button class="act" data-dg="${g.id}">Excluir</button></div>`
+        : guestGiftActions(g)
+    }
   </article>`
+}
+
+function freeGiftCard() {
+  if (!pixReady()) return ''
+  return `<article class="gift free">
+    <div class="emoji">💛</div>
+    <h3>Contribuição livre</h3>
+    <p>Prefere presentear com um valor à sua escolha? Envie por Pix com todo o carinho.</p>
+    <button class="btn primary pick" id="freePix">Presentear com Pix</button>
+  </article>`
+}
+
+async function refreshPublic() {
+  if (invite) invite = await loadInvite(invite.token)
+  await publicPage()
+}
+
+function bindGiftActions() {
+  document
+    .querySelectorAll('[data-pick]')
+    .forEach((b) => (b.onclick = () => pickGift(G.find((g) => g.id === b.dataset.pick))))
+  document.querySelectorAll('[data-pix]').forEach(
+    (b) =>
+      (b.onclick = () => {
+        const r = invite.reservations.find((x) => x.id === b.dataset.pix)
+        const g = G.find((x) => x.id === r.gift_id)
+        pop(`<p class="eyebrow">${esc(g.name)}</p><h2>Pagamento por Pix</h2><div id="pixArea"></div>`)
+        renderPix($('#pixArea'), r.quantity * g.price, `${r.quantity} cota(s).`)
+      }),
+  )
+  document.querySelectorAll('[data-cancel]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        if (!confirm('Desistir deste presente? Ele volta a ficar disponível para outros convidados.')) return
+        const r = await sb.rpc('cancel_gift_reservation', { p_token: invite.token, p_reservation: b.dataset.cancel })
+        if (r.error) return bad(r.error)
+        await refreshPublic()
+        toast('Escolha desfeita.')
+      }),
+  )
+  const free = $('#freePix')
+  if (!free) return
+  free.onclick = () => {
+    pop(`<p class="eyebrow">Contribuição livre</p>
+      <h2>Presentear com Pix</h2>
+      <form class="form" id="freeForm">
+        <label>Valor (opcional)<input name="amount" type="number" min="1" step="0.01" placeholder="Em branco: você digita o valor no banco"></label>
+        <button class="btn primary">Gerar Pix</button>
+      </form>
+      <div id="pixArea"></div>`)
+    $('#freeForm').onsubmit = (e) => {
+      e.preventDefault()
+      renderPix($('#pixArea'), +new FormData(e.target).get('amount') || 0)
+    }
+  }
+}
+
+function pickGift(g) {
+  if (!invite) {
+    return pop(`<h2>${esc(g.name)}</h2>
+      <p>Para escolher um presente, abra o site pelo link do seu convite. Assim os noivos sabem quem presenteou e ninguém escolhe o mesmo item.</p>
+      ${g.kind === 'item' ? storeLinks(g) : ''}`)
+  }
+  const left = giftLeft(g)
+  const quota = g.kind === 'quota'
+  pop(`<p class="eyebrow">${quota ? 'Cotas por Pix' : 'Presente'}</p>
+    <h2>${esc(g.name)}</h2>
+    <p>${
+      quota
+        ? `Cada cota vale ${cash(g.price)}. Restam ${left} de ${g.quota_total}.`
+        : 'Ao confirmar, o presente fica reservado para vocês e aparece como escolhido para os outros convidados. Depois é só comprar pela loja.'
+    }</p>
+    <form class="form" id="pickForm">
+      ${
+        quota
+          ? `<label>Quantas cotas?<input name="qty" type="number" min="1" max="${left}" value="1" required></label>
+             <p class="pix-amount" id="pickTotal">${cash(g.price)}</p>`
+          : ''
+      }
+      <label>Recado para os noivos (opcional)<textarea name="message" maxlength="500"></textarea></label>
+      <button class="btn primary" id="pickSubmit">${quota ? 'Reservar e pagar com Pix' : 'Confirmar que vou dar este presente'}</button>
+    </form>`)
+  const form = $('#pickForm')
+  if (quota) form.qty.oninput = () => ($('#pickTotal').textContent = cash((+form.qty.value || 0) * g.price))
+  form.onsubmit = async (e) => {
+    e.preventDefault()
+    $('#pickSubmit').disabled = true
+    const qty = quota ? Math.min(Math.max(Math.floor(+form.qty.value) || 1, 1), left) : 1
+    const r = await sb.rpc('reserve_gift', {
+      p_token: invite.token,
+      p_gift: g.id,
+      p_quantity: qty,
+      p_message: form.message.value,
+    })
+    if (r.error) {
+      $('#pickSubmit').disabled = false
+      return bad(r.error)
+    }
+    await refreshPublic()
+    if (quota) {
+      pop(`<p class="eyebrow">${esc(g.name)}</p><h2>Obrigado! Agora é só pagar</h2><div id="pixArea"></div>
+        <p class="note">Se não conseguir pagar agora, o Pix continua disponível no botão “Ver Pix” do presente.</p>`)
+      renderPix($('#pixArea'), qty * g.price, `${qty} cota(s).`)
+    } else {
+      pop(`<p class="eyebrow">Presente reservado</p><h2>Obrigado pelo carinho!</h2>
+        <p><b>${esc(g.name)}</b> está reservado para vocês. Compre pela loja de sua preferência:</p>${storeLinks(g)}`)
+    }
+  }
 }
 
 function admin() {
@@ -710,10 +957,11 @@ function giftsPanel() {
       <div>
         <p class="eyebrow">Lista de presentes</p>
         <h2>Presentes</h2>
-        <p>Adicione a foto e quantos links de lojas quiser (Amazon, Mercado Livre, Shopee...).</p>
+        <p>Presentes únicos com links das lojas, ou cotas pagas por Pix. Vocês veem aqui quem escolheu cada um.</p>
       </div>
       <button class="btn primary" id="ng">+ Novo presente</button>
     </div>
+    ${pixReady() ? '' : '<p class="notice-warn">Cadastre a chave Pix em Configurações para liberar as cotas e a contribuição livre.</p>'}
     <div class="grid">${G.map((g) => giftCard(g, true)).join('') || '<p class="empty">A lista de presentes está vazia.</p>'}</div>
   </main>`
 }
@@ -800,6 +1048,18 @@ function settingsPanel() {
           <button type="button" class="back" id="addFaq">+ Adicionar pergunta</button>
           <button type="button" class="back" id="suggestFaq">Sugerir perguntas comuns</button>
         </div>
+        <h3>Pix para presentes</h3>
+        <p class="note">Usado nas cotas e na contribuição livre. Os convidados veem o nome do recebedor e a chave no código Pix.</p>
+        <div class="two">
+          <label>Tipo de chave<select name="pix_key_type">${Object.entries(PIX_KEY_TYPES)
+            .map(([k, label]) => `<option value="${k}" ${W.pix_key_type === k ? 'selected' : ''}>${label}</option>`)
+            .join('')}</select></label>
+          <label>Chave Pix<input name="pix_key" value="${esc(W.pix_key)}" placeholder="CPF, celular, e-mail ou chave aleatória"></label>
+        </div>
+        <div class="two">
+          <label>Nome do recebedor (como no banco)<input name="pix_name" value="${esc(W.pix_name)}" maxlength="25"></label>
+          <label>Cidade do recebedor<input name="pix_city" value="${esc(W.pix_city)}" maxlength="15" placeholder="Ex.: Belo Horizonte"></label>
+        </div>
         <h3>Aparência</h3>
         <div class="two">
           <label>Cor principal<input type="color" name="primary_color" value="${esc(W.primary_color)}"></label>
@@ -860,6 +1120,17 @@ function bind() {
           if (r.error) return bad(r.error)
           await removeGiftImage(G.find((g) => g.id === b.dataset.dg)?.image_path)
           await log('gift', 'Um presente foi excluído da lista.')
+          owner()
+        }),
+    )
+    document.querySelectorAll('[data-release]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const res = R.find((r) => r.id === b.dataset.release)
+          if (!confirm(`Liberar a escolha de ${res.families?.name || 'convidado'}? O presente volta a ficar disponível.`)) return
+          const r = await sb.from('gift_reservations').delete().eq('id', res.id)
+          if (r.error) return bad(r.error)
+          await log('gift', `A escolha de ${res.families?.name || 'um convidado'} foi liberada.`)
           owner()
         }),
     )
@@ -1286,10 +1557,18 @@ function gift(g = {}) {
   pop(`<h2>${g.id ? 'Editar' : 'Novo'} presente</h2>
     <form class="form" id="gift">
       <label>Nome<input name="name" value="${esc(g.name)}" required></label>
+      <label>Tipo
+        <select name="kind" id="giftKind">
+          <option value="item" ${g.kind !== 'quota' ? 'selected' : ''}>Presente único (o convidado compra na loja)</option>
+          <option value="quota" ${g.kind === 'quota' ? 'selected' : ''}>Cotas por Pix (ex.: lua de mel)</option>
+        </select>
+      </label>
       <div class="two">
-        <label>Valor<input name="price" type="number" step="0.01" value="${g.price || ''}" required></label>
-        <label>Ícone (quando não houver imagem)<input name="icon" value="${esc(g.icon || '🎁')}"></label>
+        <label><span id="priceLabel">${g.kind === 'quota' ? 'Valor de cada cota' : 'Valor'}</span><input name="price" type="number" step="0.01" min="0" value="${g.price || ''}" required></label>
+        <label id="quotaField" ${g.kind === 'quota' ? '' : 'hidden'}>Quantidade de cotas<input name="quota_total" type="number" min="${Math.max(g.taken || 0, 1)}" value="${g.quota_total || 10}"></label>
       </div>
+      <label>Ícone (quando não houver imagem)<input name="icon" value="${esc(g.icon || '🎁')}"></label>
+      <p class="notice-warn" id="pixWarn" ${g.kind === 'quota' && !pixReady() ? '' : 'hidden'}>Cadastre a chave Pix em Configurações para os convidados conseguirem presentear as cotas.</p>
       <label>Descrição<textarea name="description">${esc(g.description)}</textarea></label>
       <div>
         <p class="eyebrow">Imagem do presente</p>
@@ -1308,6 +1587,13 @@ function gift(g = {}) {
       </div>
       <button class="btn primary" id="saveGift">Salvar presente</button>
     </form>`)
+
+  $('#giftKind').onchange = (e) => {
+    const quota = e.target.value === 'quota'
+    $('#quotaField').hidden = !quota
+    $('#priceLabel').textContent = quota ? 'Valor de cada cota' : 'Valor'
+    $('#pixWarn').hidden = !quota || pixReady()
+  }
 
   let file = null
   let dropImage = false
@@ -1363,6 +1649,8 @@ function gift(g = {}) {
         icon: form.get('icon'),
         description: form.get('description'),
         links: form.getAll('link').map((u) => u.trim()).filter(Boolean),
+        kind: form.get('kind'),
+        quota_total: form.get('kind') === 'quota' ? Math.max(Math.floor(+form.get('quota_total')) || 1, 1) : 1,
         image_path,
         wedding_id: W.id,
       }
