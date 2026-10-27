@@ -14,15 +14,18 @@ const cash = (v) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency
 const localDate = (v) => new Date(v + 'T12:00')
 const dt = (v) => (v ? localDate(v).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' }) : 'A definir')
 
-// W: casamento, G: presentes, F: famílias, B: orçamento, A: atualizações, U: usuário logado.
+// W: casamento, G: presentes, F: famílias (com .guests), B: orçamento, A: atualizações,
+// P: informações dos padrinhos, U: usuário logado, invite: convite aberto pelo link.
 let W
 let G = []
 let F = []
 let B = []
 let A = []
+let P = {}
 let U
 let view = 'home'
-let guest
+let guestFilter = 'all'
+let invite = null
 
 const VIEWS = {
   home: 'Visão geral',
@@ -30,6 +33,50 @@ const VIEWS = {
   gifts: 'Lista de presentes',
   budget: 'Orçamento',
   settings: 'Configurações',
+}
+
+const AGE_GROUPS = { adult: 'Adulto', child: 'Criança', baby: 'Bebê' }
+const RSVP_LABELS = { confirmed: 'Confirmado', declined: 'Não irá', pending: 'Pendente' }
+const ORIGINS = [
+  'Amigo(a) da Noiva',
+  'Amigo(a) do Noivo',
+  'Amigo(a) do casal',
+  'Colega de trabalho do Noivo',
+  'Colega de trabalho da Noiva',
+  'Convidado(a) dos pais da noiva',
+  'Convidado(a) dos pais do noivo',
+  'Família Noiva',
+  'Família Noivo',
+]
+const TOKEN_KEY = 'casamento:convite'
+
+const siteUrl = () => cfg.siteUrl || location.origin + location.pathname
+const inviteLink = (f) => `${siteUrl()}#c=${f.access_token}`
+const allGuests = () => F.flatMap((f) => f.guests)
+
+// Link do convite (#c=...) tem prioridade; sem ele, usa o último convite aberto neste aparelho.
+function inviteToken() {
+  const fromLink = new URLSearchParams(location.hash.slice(1)).get('c')
+  try {
+    if (fromLink) localStorage.setItem(TOKEN_KEY, fromLink)
+    return { token: fromLink || localStorage.getItem(TOKEN_KEY), fromLink: !!fromLink }
+  } catch {
+    return { token: fromLink, fromLink: !!fromLink }
+  }
+}
+
+function forgetInvite() {
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+  } catch {}
+}
+
+async function loadInvite(token) {
+  if (!token) return null
+  const r = await sb.rpc('guest_invite', { p_token: token })
+  if (r.error) throw r.error
+  if (!r.data) forgetInvite()
+  return r.data ? { ...r.data, token } : null
 }
 
 function app(x) {
@@ -81,9 +128,17 @@ async function boot() {
   const a = await sb.auth.getUser()
   U = a.data.user
   paint()
+  const { token, fromLink } = inviteToken()
+  if (W && fromLink) return openInvite(token)
   if (U && W?.owner_id === U.id) return owner()
-  if (W) return publicPage()
+  if (W) return openInvite(token)
   setup()
+}
+
+async function openInvite(token) {
+  invite = await loadInvite(token)
+  if (token && !invite && location.hash.includes('c=')) toast('Convite não encontrado. Confira o link recebido.')
+  return publicPage()
 }
 
 function connect() {
@@ -156,16 +211,20 @@ function login() {
 }
 
 async function owner() {
-  const [f, g, b, a] = await Promise.all([
-    sb.from('families').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }),
+  const [f, g, b, a, p] = await Promise.all([
+    sb.from('families').select('*, guests(*)').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('gifts').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }),
     sb.from('budget_items').select('*').eq('wedding_id', W.id).order('due_date'),
     sb.from('activity_log').select('*').eq('wedding_id', W.id).order('created_at', { ascending: false }).limit(30),
+    sb.from('wedding_party_info').select('*').eq('wedding_id', W.id).maybeSingle(),
   ])
-  F = f.data || []
+  const failed = [f, g, b, a, p].find((r) => r.error)
+  if (failed) bad(failed.error)
+  F = (f.data || []).map((x) => ({ ...x, guests: (x.guests || []).sort((m, n) => m.position - n.position) }))
   G = g.data || []
   B = b.data || []
   A = a.data || []
+  P = p.data || {}
   admin()
 }
 
@@ -190,14 +249,20 @@ async function publicPage() {
   const when = W.event_date
     ? dt(W.event_date) + (W.event_time ? ' às ' + W.event_time.slice(0, 5) : '')
     : 'Em breve, todos os detalhes.'
+  const answered = invite?.guests.some((g) => g.rsvp_status !== 'pending')
+  const cta = invite
+    ? `<button id="guest" class="btn primary">${answered ? 'Ver ou alterar resposta' : 'Confirmar presença'}</button>
+       ${answered ? `<p class="note">${rsvpSummary(invite.guests)}</p>` : ''}`
+    : '<p class="note">Para confirmar presença, use o link enviado no seu convite.</p>'
   app(`<div class="public" ${bg}>
     <nav class="public-nav"><b>${esc(W.bride)} & ${esc(W.groom)}</b><button id="admin">Área dos noivos</button></nav>
     <section class="public-hero">
-      <p class="eyebrow">Nosso casamento</p>
+      <p class="eyebrow">${invite ? `Convite para ${esc(invite.family.name)}` : 'Nosso casamento'}</p>
       <h1>${esc(W.bride)}<br>& ${esc(W.groom)}</h1>
       <p>${when}</p>
-      <button id="guest" class="btn primary">Confirmar presença</button>
+      ${cta}
     </section>
+    ${invite?.family.is_wedding_party ? partySection(invite.party || {}) : ''}
     <section class="public-section">
       <p class="eyebrow">O grande dia</p>
       <h2>Informações para você</h2>
@@ -215,7 +280,30 @@ async function publicPage() {
     <footer class="footer">Feito com carinho para celebrar um novo capítulo.</footer>
   </div>`)
   $('#admin').onclick = () => (U && W.owner_id === U.id ? owner() : login())
-  $('#guest').onclick = guestStart
+  if (invite) $('#guest').onclick = rsvp
+}
+
+function rsvpSummary(guests) {
+  const yes = guests.filter((g) => g.rsvp_status === 'confirmed').length
+  if (!yes) return 'Vocês informaram que não poderão ir. Sentiremos sua falta!'
+  return `Presença confirmada para ${yes} de ${guests.length} pessoa(s). Até lá!`
+}
+
+function partySection(p) {
+  const items = [
+    ['Recado dos noivos', p.message],
+    ['Traje dos padrinhos', p.dress_code],
+    ['Chegada', p.arrival],
+    ['Ensaio', p.rehearsal],
+  ].filter(([, text]) => text)
+  return `<section class="public-section party">
+    <p class="eyebrow">Padrinhos e madrinhas</p>
+    <h2>Para vocês, com carinho</h2>
+    <div class="info">${
+      items.map(([title, text]) => `<article><h3>${title}</h3><p>${esc(text).replace(/\n/g, '<br>')}</p></article>`).join('') ||
+      '<p class="empty">Em breve, os noivos compartilharão as orientações para padrinhos.</p>'
+    }</div>
+  </section>`
 }
 
 function giftCard(g, manage = false) {
@@ -281,10 +369,10 @@ function panel() {
   if (view === 'gifts') return giftsPanel()
   if (view === 'budget') return budgetPanel()
   if (view === 'settings') return settingsPanel()
-  const people = (status) => F.filter((f) => !status || f.rsvp_status === status).reduce((n, f) => n + f.people_count, 0)
-  const total = people()
-  const yes = people('confirmed')
-  const no = people('declined')
+  const people = allGuests()
+  const total = people.length
+  const yes = people.filter((g) => g.rsvp_status === 'confirmed').length
+  const no = people.filter((g) => g.rsvp_status === 'declined').length
   const due = B.reduce((n, b) => n + Number(b.amount) - Number(b.amount_paid), 0)
   const today = new Date()
   today.setHours(12, 0, 0, 0)
@@ -326,30 +414,51 @@ function panel() {
   </main>`
 }
 
+const GUEST_FILTERS = {
+  all: ['Todos', () => true],
+  party: ['Padrinhos', (f) => f.is_wedding_party],
+  pending: ['Pendentes', (f) => f.guests.some((g) => g.rsvp_status === 'pending')],
+}
+
 function guestPanel() {
-  const status = { confirmed: 'Confirmado', declined: 'Não irá', pending: 'Pendente' }
+  const shown = F.filter(GUEST_FILTERS[guestFilter][1])
   const rows =
-    F.map(
-      (f) => `<tr>
-        <td><b>${esc(f.name)}</b><small>${f.people_count} pessoa(s)</small></td>
+    shown
+      .map((f) => {
+        const yes = f.guests.filter((g) => g.rsvp_status === 'confirmed').length
+        return `<tr>
+        <td><b>${esc(f.name)}</b>${f.is_wedding_party ? '<span class="badge">Padrinhos</span>' : ''}<small>${f.guests
+          .map((g) => esc(g.name))
+          .join(', ')}</small></td>
         <td>${esc(f.head_name)}</td>
-        <td><b>${esc(f.pin_code)}</b></td>
+        <td>${yes} de ${f.guests.length}</td>
         <td>${esc(f.origin || '—')}</td>
-        <td><span class="status ${f.rsvp_status}">${status[f.rsvp_status] || 'Pendente'}</span></td>
-        <td><div class="actions"><button class="act" data-ef="${f.id}">Editar</button><button class="act" data-inv="${f.id}">Convite</button></div></td>
-      </tr>`,
-    ).join('') || '<tr><td colspan="6" class="empty">Nenhuma família cadastrada.</td></tr>'
+        <td><span class="status ${f.rsvp_status}">${RSVP_LABELS[f.rsvp_status] || 'Pendente'}</span>${
+          f.rsvp_note ? `<small>“${esc(f.rsvp_note)}”</small>` : ''
+        }</td>
+        <td><div class="actions">
+          <button class="act" data-inv="${f.id}">Convite</button>
+          <button class="act" data-ef="${f.id}">Editar</button>
+          <button class="act" data-df="${f.id}">Excluir</button>
+        </div></td>
+      </tr>`
+      })
+      .join('') || '<tr><td colspan="6" class="empty">Nenhuma família encontrada.</td></tr>'
+  const filters = Object.entries(GUEST_FILTERS)
+    .map(([k, [label]]) => `<button class="${guestFilter === k ? 'active' : ''}" data-gf="${k}">${label}</button>`)
+    .join('')
   return `<main class="page">
     <div class="head">
       <div>
         <p class="eyebrow">Famílias e RSVP</p>
         <h2>Convidados</h2>
-        <p>PIN único por família e confirmação pelo responsável.</p>
+        <p>Cada família recebe um link próprio para confirmar a presença de cada pessoa.</p>
       </div>
       <button class="btn primary" id="nf">+ Nova família</button>
     </div>
+    <div class="toolbar">${filters}</div>
     <table class="table">
-      <thead><tr><th>Família</th><th>Responsável</th><th>PIN</th><th>Origem</th><th>RSVP</th><th></th></tr></thead>
+      <thead><tr><th>Família</th><th>Responsável</th><th>Confirmados</th><th>Origem</th><th>RSVP</th><th></th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </main>`
@@ -422,6 +531,13 @@ function settingsPanel() {
         </div>
         <label>Imagem de fundo (URL)<input type="url" name="background_url" value="${esc(W.background_url)}"></label>
         <label>Fonte<select name="title_font">${font('Playfair Display')}${font('Montserrat')}</select></label>
+        <label>Prazo para confirmar presença<input type="date" name="rsvp_deadline" value="${W.rsvp_deadline || ''}"></label>
+        <h3>Padrinhos e madrinhas</h3>
+        <p class="note">Aparece somente para as famílias marcadas como padrinhos, pelo link do convite.</p>
+        <label>Recado para os padrinhos<textarea name="party_message">${esc(P.message)}</textarea></label>
+        <label>Traje dos padrinhos e madrinhas<textarea name="party_dress_code">${esc(P.dress_code)}</textarea></label>
+        <label>Horário e local de chegada<textarea name="party_arrival">${esc(P.arrival)}</textarea></label>
+        <label>Ensaio<textarea name="party_rehearsal">${esc(P.rehearsal)}</textarea></label>
         <button class="btn primary">Salvar configurações</button>
       </form>
     </section>
@@ -436,7 +552,25 @@ function bind() {
       .forEach((b) => (b.onclick = () => family(F.find((f) => f.id === b.dataset.ef))))
     document
       .querySelectorAll('[data-inv]')
-      .forEach((b) => (b.onclick = () => invite(F.find((f) => f.id === b.dataset.inv))))
+      .forEach((b) => (b.onclick = () => inviteModal(F.find((f) => f.id === b.dataset.inv))))
+    document.querySelectorAll('[data-df]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const f = F.find((x) => x.id === b.dataset.df)
+          if (!confirm(`Excluir a família ${f.name} e todas as respostas dela?`)) return
+          const r = await sb.from('families').delete().eq('id', f.id)
+          if (r.error) return bad(r.error)
+          await log('guest', `A família ${f.name} foi excluída.`)
+          owner()
+        }),
+    )
+    document.querySelectorAll('[data-gf]').forEach(
+      (b) =>
+        (b.onclick = () => {
+          guestFilter = b.dataset.gf
+          admin()
+        }),
+    )
   }
   if (view === 'gifts') {
     $('#ng').onclick = () => gift()
@@ -460,9 +594,17 @@ function bind() {
       // Campos de data/hora vazios precisam ir como null para o Postgres.
       d.event_date ||= null
       d.event_time ||= null
+      d.rsvp_deadline ||= null
+      const party = { wedding_id: W.id }
+      for (const key of Object.keys(d).filter((k) => k.startsWith('party_'))) {
+        party[key.slice(6)] = d[key]
+        delete d[key]
+      }
       const r = await sb.from('weddings').update(d).eq('id', W.id).select().single()
       if (r.error) return bad(r.error)
       W = r.data
+      const p = await sb.from('wedding_party_info').upsert(party)
+      if (p.error) return bad(p.error)
       await log('settings', 'As configurações do casamento foram atualizadas.')
       toast('Configurações salvas.')
       owner()
@@ -470,30 +612,85 @@ function bind() {
   }
 }
 
-function family(f = {}) {
-  const pin = f.pin_code || String(Math.floor(1000 + Math.random() * 9000))
+function personRow(g = {}) {
+  const ages = Object.entries(AGE_GROUPS)
+    .map(([k, label]) => `<option value="${k}" ${g.age_group === k ? 'selected' : ''}>${label}</option>`)
+    .join('')
+  return `<div class="person-row" data-id="${g.id || ''}">
+    <input name="person" value="${esc(g.name)}" placeholder="Nome" required>
+    <select name="age">${ages}</select>
+    <button type="button" class="remove" title="Remover pessoa">×</button>
+  </div>`
+}
+
+function family(f = { guests: [] }) {
+  const origins = ORIGINS.map((o) => `<option value="${esc(o)}">`).join('')
   pop(`<h2>${f.id ? 'Editar' : 'Nova'} família</h2>
     <form class="form" id="fam">
-      <label>Nome da família<input name="name" value="${esc(f.name)}" required></label>
+      <label>Nome da família<input name="name" value="${esc(f.name)}" placeholder="Família Silva" required></label>
       <div class="two">
         <label>Responsável<input name="head_name" value="${esc(f.head_name)}" required></label>
-        <label>PIN de 4 dígitos<input name="pin_code" value="${esc(pin)}" pattern="[0-9]{4}" maxlength="4" required></label>
+        <label>WhatsApp, com DDI<input name="phone" value="${esc(f.phone)}" placeholder="5511999999999"></label>
       </div>
-      <div class="two">
-        <label>Pessoas<input name="people_count" type="number" min="1" value="${f.people_count || 1}" required></label>
-        <label>Origem<input name="origin" value="${esc(f.origin)}"></label>
+      <label>Origem<input name="origin" value="${esc(f.origin)}" list="origins"><datalist id="origins">${origins}</datalist></label>
+      <label class="check"><input type="checkbox" name="is_wedding_party" ${f.is_wedding_party ? 'checked' : ''}>Padrinhos e madrinhas</label>
+      <div>
+        <p class="eyebrow">Pessoas convidadas</p>
+        <div class="people" id="people">${(f.guests.length ? f.guests : [{}]).map(personRow).join('')}</div>
+        <button type="button" class="back" id="addPerson">+ Adicionar pessoa</button>
       </div>
-      <label>WhatsApp, com DDI<input name="phone" value="${esc(f.phone)}" placeholder="5511999999999"></label>
       <button class="btn primary">Salvar família</button>
     </form>`)
+  const people = $('#people')
+  people.onclick = (e) => {
+    if (!e.target.classList.contains('remove')) return
+    if (people.children.length === 1) return toast('A família precisa de pelo menos uma pessoa.')
+    e.target.closest('.person-row').remove()
+  }
+  $('#addPerson').onclick = () => {
+    people.insertAdjacentHTML('beforeend', personRow())
+    people.lastElementChild.querySelector('input').focus()
+  }
   $('#fam').onsubmit = async (e) => {
     e.preventDefault()
-    const d = Object.fromEntries(new FormData(e.target))
-    d.people_count = +d.people_count
-    d.wedding_id = W.id
-    const r = await sb.from('families').upsert(f.id ? { ...d, id: f.id } : d)
-    if (r.error) return bad(r.error.code === '23505' ? new Error('Este PIN já está em uso. Escolha outro.') : r.error)
-    await log('guest', `${d.head_name} foi ${f.id ? 'atualizado(a)' : 'incluído(a)'} como responsável.`)
+    const form = new FormData(e.target)
+    const rows = [...people.querySelectorAll('.person-row')].map((row, i) => ({
+      id: row.dataset.id || null,
+      name: row.querySelector('[name=person]').value.trim(),
+      age_group: row.querySelector('[name=age]').value,
+      position: i,
+    }))
+    const d = {
+      name: form.get('name'),
+      head_name: form.get('head_name'),
+      phone: form.get('phone'),
+      origin: form.get('origin'),
+      is_wedding_party: form.has('is_wedding_party'),
+      people_count: rows.length,
+      wedding_id: W.id,
+    }
+    const r = await sb
+      .from('families')
+      .upsert(f.id ? { ...d, id: f.id } : d)
+      .select()
+      .single()
+    if (r.error) return bad(r.error)
+    const familyId = r.data.id
+
+    // Sincroniza as pessoas: remove as excluídas, atualiza as existentes e cria as novas.
+    // A resposta (rsvp_status) não é enviada, então quem já respondeu mantém a resposta.
+    const kept = rows.filter((x) => x.id).map((x) => x.id)
+    const removed = f.guests.filter((g) => !kept.includes(g.id)).map((g) => g.id)
+    const ops = []
+    if (removed.length) ops.push(sb.from('guests').delete().in('id', removed))
+    const existing = rows.filter((x) => x.id).map((x) => ({ ...x, family_id: familyId }))
+    if (existing.length) ops.push(sb.from('guests').upsert(existing))
+    const added = rows.filter((x) => !x.id).map(({ id, ...x }) => ({ ...x, family_id: familyId }))
+    if (added.length) ops.push(sb.from('guests').insert(added))
+    const failed = (await Promise.all(ops)).find((x) => x.error)
+    if (failed) return bad(failed.error)
+
+    await log('guest', `A família ${d.name} foi ${f.id ? 'atualizada' : 'incluída'}.`)
     closeModal()
     owner()
   }
@@ -555,12 +752,60 @@ function budget() {
   }
 }
 
-function invite(f) {
-  const msg = encodeURIComponent(
-    `Olá, ${f.head_name}! Você está convidado(a) para o casamento de ${W.bride} e ${W.groom}.\n\nAcesse ${cfg.siteUrl || location.href} e use o PIN da família: *${f.pin_code}*.`,
-  )
-  const phone = String(f.phone || '').replace(/\D/g, '')
-  window.open(`https://wa.me/${phone}?text=${msg}`, '_blank')
+// Desenha o QR Code em um canvas; `size` é o tamanho de cada módulo em pixels.
+function qrCanvas(text, size) {
+  const qr = qrcode(0, 'M')
+  qr.addData(text)
+  qr.make()
+  const margin = 4
+  const count = qr.getModuleCount()
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = (count + margin * 2) * size
+  const ctx = canvas.getContext('2d')
+  ctx.fillStyle = '#fff'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.fillStyle = '#000'
+  for (let row = 0; row < count; row++) {
+    for (let col = 0; col < count; col++) {
+      if (qr.isDark(row, col)) ctx.fillRect((col + margin) * size, (row + margin) * size, size, size)
+    }
+  }
+  return canvas
+}
+
+function inviteModal(f) {
+  const link = inviteLink(f)
+  pop(`<p class="eyebrow">Convite${f.is_wedding_party ? ' · Padrinhos' : ''}</p>
+    <h2>${esc(f.name)}</h2>
+    <p>Este link é exclusivo desta família. Quem abrir verá ${f.guests.length} pessoa(s) para confirmar.</p>
+    <div class="invite-link"><input id="inviteLink" value="${esc(link)}" readonly><button class="btn soft" id="copy">Copiar</button></div>
+    <div class="qr" id="qr"></div>
+    <div class="actions">
+      <button class="btn primary" id="whats">Enviar pelo WhatsApp</button>
+      <button class="btn soft" id="qrDownload">Baixar QR Code</button>
+    </div>`)
+  $('#qr').append(qrCanvas(link, 6))
+  $('#copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(link)
+    } catch {
+      $('#inviteLink').select()
+      document.execCommand('copy')
+    }
+    toast('Link copiado.')
+  }
+  $('#qrDownload').onclick = () => {
+    const a = document.createElement('a')
+    a.href = qrCanvas(link, 24).toDataURL('image/png')
+    a.download = `convite-${f.name.normalize('NFD').replace(/[^\w]+/g, '-').toLowerCase()}.png`
+    a.click()
+  }
+  $('#whats').onclick = async () => {
+    const msg = `Olá, ${f.head_name}! Com muita alegria, convidamos vocês para o casamento de ${W.bride} e ${W.groom}.\n\nConfirme a presença pelo link do seu convite:\n${link}`
+    const phone = String(f.phone || '').replace(/\D/g, '')
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank')
+    await log('guest', `Convite enviado para ${f.name}.`)
+  }
 }
 
 function updates() {
@@ -573,77 +818,43 @@ function updates() {
   )
 }
 
-async function callGuestAccess(body) {
-  const r = await sb.functions.invoke('guest-access', { body })
-  if (r.error) {
-    // Em respostas de erro (4xx/5xx), a mensagem da função vem no corpo da resposta.
-    const detail = await r.error.context?.json?.().catch(() => null)
-    throw new Error(detail?.error || 'Não foi possível concluir agora.')
-  }
-  if (r.data?.error) throw new Error(r.data.error)
-  return r.data
-}
-
-function guestStart() {
-  pop(`<p class="eyebrow">Confirmação em duas etapas</p>
-    <h2>Seu convite</h2>
-    <form class="form" id="start">
-      <label>PIN de 4 dígitos<input name="pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required></label>
-      <label>Nome do responsável<input name="head" required></label>
-      <button class="btn primary">Enviar código</button>
-    </form>`)
-  $('#start').onsubmit = async (e) => {
-    e.preventDefault()
-    const d = Object.fromEntries(new FormData(e.target))
-    try {
-      const data = await callGuestAccess({ action: 'start', ...d })
-      verify(data.familyId)
-    } catch (err) {
-      bad(err)
-    }
-  }
-}
-
-function verify(familyId) {
-  $('#modalBody').innerHTML = `<p class="eyebrow">Segunda etapa</p>
-    <h2>Código enviado</h2>
-    <p>Enviamos um código para o WhatsApp cadastrado.</p>
-    <form class="form" id="verify">
-      <label>Código<input name="code" inputmode="numeric" maxlength="6" required></label>
-      <button class="btn primary">Acessar convite</button>
-    </form>`
-  $('#verify').onsubmit = async (e) => {
-    e.preventDefault()
-    const code = new FormData(e.target).get('code')
-    try {
-      const data = await callGuestAccess({ action: 'verify', familyId, code })
-      // O código é enviado de novo ao gravar a resposta, que só é aceita com ele.
-      guest = { ...data.family, code }
-      rsvp()
-    } catch (err) {
-      bad(err)
-    }
-  }
-}
-
 function rsvp() {
-  pop(`<h2>Olá, ${esc(guest.head_name)}!</h2>
-    <p>Deseja confirmar a presença da sua família?</p>
-    <div class="actions">
-      <button class="btn primary" id="yes">Sim, estaremos lá</button>
-      <button class="btn soft" id="no">Não conseguiremos ir</button>
-    </div>`)
-  $('#yes').onclick = () => send('confirmed')
-  $('#no').onclick = () => send('declined')
-}
-
-async function send(response) {
-  try {
-    await callGuestAccess({ action: 'rsvp', familyId: guest.id, code: guest.code, response })
+  const deadline = invite.rsvp_deadline
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'America/Sao_Paulo' })
+  const closed = deadline && today > deadline
+  const people = invite.guests
+    .map(
+      (g) => `<div class="person">
+        <span>${esc(g.name)}${g.age_group !== 'adult' ? `<small>${AGE_GROUPS[g.age_group]}</small>` : ''}</span>
+        <div class="choice">
+          <label><input type="radio" name="g-${g.id}" value="confirmed" ${g.rsvp_status === 'confirmed' ? 'checked' : ''} ${closed ? 'disabled' : ''} required>Vai</label>
+          <label><input type="radio" name="g-${g.id}" value="declined" ${g.rsvp_status === 'declined' ? 'checked' : ''} ${closed ? 'disabled' : ''}>Não vai</label>
+        </div>
+      </div>`,
+    )
+    .join('')
+  pop(`<p class="eyebrow">${esc(invite.family.name)}</p>
+    <h2>Olá, ${esc(invite.family.head_name)}!</h2>
+    <p>${
+      closed
+        ? 'O prazo para confirmar presença terminou. Se precisar mudar algo, fale com os noivos.'
+        : `Marque quem estará com a gente${deadline ? ` até ${dt(deadline)}` : ''}.`
+    }</p>
+    <form class="form" id="rsvp">
+      <div>${people}</div>
+      <label>Restrição alimentar, acessibilidade ou recado (opcional)<textarea name="note" maxlength="1000" ${closed ? 'disabled' : ''}>${esc(invite.family.rsvp_note)}</textarea></label>
+      ${closed ? '' : '<button class="btn primary">Enviar resposta</button>'}
+    </form>`)
+  $('#rsvp').onsubmit = async (e) => {
+    e.preventDefault()
+    const form = new FormData(e.target)
+    const answers = invite.guests.map((g) => ({ id: g.id, status: form.get('g-' + g.id) }))
+    const r = await sb.rpc('guest_rsvp', { p_token: invite.token, p_answers: answers, p_note: form.get('note') || '' })
+    if (r.error) return bad(r.error)
+    invite = await loadInvite(invite.token)
     closeModal()
+    publicPage()
     toast('Resposta registrada. Obrigado!')
-  } catch (err) {
-    bad(err)
   }
 }
 

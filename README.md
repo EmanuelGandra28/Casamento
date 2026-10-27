@@ -5,7 +5,7 @@ Site responsivo para noivos e convidados, publicado no GitHub Pages e conectado 
 ## Publicar pela primeira vez
 
 1. Crie um projeto em [Supabase](https://supabase.com/dashboard).
-2. No **SQL Editor**, execute `supabase/schema.sql`.
+2. No **SQL Editor**, execute `supabase/schema.sql` e depois os arquivos de `supabase/migrations/`, em ordem.
 3. Em **Authentication > Providers > Email**, mantenha e-mail/senha ativo. Confirme o e-mail criado pelos noivos ou desative temporariamente a confirmação para o primeiro acesso.
 4. Em **Project Settings > API**, copie a **Project URL** e a chave **anon/public publishable**. Nunca use a chave `service_role` no site.
 5. No GitHub, abra **Settings > Secrets and variables > Actions** e crie os segredos `SUPABASE_URL` e `SUPABASE_ANON_KEY`.
@@ -14,22 +14,18 @@ Site responsivo para noivos e convidados, publicado no GitHub Pages e conectado 
 
 O workflow gera `config.js` durante a publicação. Para testar no computador, preencha manualmente `config.js` com os mesmos valores públicos.
 
-## RSVP em duas etapas por WhatsApp
+## Convites e RSVP
 
-`supabase/functions/guest-access/index.ts` é a função protegida que valida PIN e responsável, cria um código de seis dígitos e grava a confirmação. Publique-a no Supabase como Edge Function e configure estes segredos lá:
+Cada família recebe um link exclusivo (`.../Casamento/#c=<código>`), gerado automaticamente pelo banco. Na área dos noivos, o botão **Convite** de cada família mostra o link, envia a mensagem pelo WhatsApp e baixa o QR Code em PNG para convites impressos.
 
-- `WHATSAPP_TOKEN`
-- `WHATSAPP_PHONE_NUMBER_ID`
-- `WHATSAPP_TEMPLATE_NAME`
-
-O modelo de mensagem do WhatsApp deve receber o código como primeiro parâmetro do corpo. Sem esses segredos, o app não libera RSVP e não expõe dados de famílias.
+Quem abre o link vê somente a própria família e marca, pessoa por pessoa, quem vai ou não. Famílias marcadas como **Padrinhos e madrinhas** também veem as orientações cadastradas em **Configurações**. O RSVP é gravado pelas funções `guest_invite` e `guest_rsvp` do Postgres, que só aceitam o código do próprio link e respeitam o prazo configurado.
 
 ## Segurança
 
-- Orçamento, famílias, telefones e PINs só podem ser vistos pelos noivos autenticados.
+- Orçamento, famílias, pessoas, telefones e informações dos padrinhos só podem ser vistos pelos noivos autenticados.
 - O site público lê somente a cerimônia e a lista de presentes.
-- O RSVP passa pela Edge Function; convidados não acessam tabelas privadas.
-- A chave `service_role` fica apenas nos segredos da função, nunca no GitHub Pages.
+- Convidados não acessam tabelas privadas: as funções do RSVP devolvem e alteram apenas a família dona do link.
+- O site usa somente a chave pública do Supabase; nunca coloque a `service_role` no GitHub Pages.
 
 ## Desenvolvimento local
 

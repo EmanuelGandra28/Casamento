@@ -669,6 +669,162 @@ button {
   opacity: 1;
 }
 
+.note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.public-hero .note {
+  margin-top: 14px;
+}
+
+.form h3 {
+  font: 600 18px var(--title);
+  margin: 14px 0 0;
+}
+
+.form .check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.form .check input {
+  width: auto;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 3px 7px;
+  border-radius: 9px;
+  background: var(--s);
+  color: var(--ink);
+  font-size: 9px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.toolbar button {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 7px;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.toolbar button.active {
+  border-color: var(--p);
+  color: var(--p);
+}
+
+.people {
+  display: grid;
+  gap: 8px;
+}
+
+.person-row {
+  display: grid;
+  grid-template-columns: 1fr 110px 38px;
+  gap: 8px;
+}
+
+.person-row .remove {
+  border: 0;
+  border-radius: 7px;
+  background: #f3f0eb;
+  font-size: 18px;
+  color: var(--muted);
+}
+
+.person {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0ece7;
+}
+
+.person small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.choice {
+  display: flex;
+  gap: 6px;
+}
+
+.form .choice label {
+  display: block;
+  position: relative;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.form .choice input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.form .choice label:has(input:checked) {
+  background: var(--p);
+  border-color: var(--p);
+  color: #fff;
+}
+
+.form .choice label:has(input:focus-visible) {
+  outline: 2px solid var(--p);
+  outline-offset: 2px;
+}
+
+.invite-link {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.invite-link input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.qr {
+  display: grid;
+  justify-items: center;
+  margin: 18px 0 6px;
+}
+
+.qr canvas {
+  width: 180px;
+  height: 180px;
+  image-rendering: pixelated;
+}
+
+.party {
+  background: #fffdf9;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
 @media (max-width:900px) {
   .cards {
     grid-template-columns: repeat(2,1fr);
